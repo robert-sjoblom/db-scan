@@ -29,7 +29,18 @@ Large parts of this readme (but not the code) was AI-summarized. Tread carefully
 
 The tool expects a REST API endpoint that returns PostgreSQL node information. The API must:
 
-**Endpoint**: `GET https://database.example.com/api/v1/nodes` (THIS IS ALSO HARDCODED, GOOD PR OPPORTUNITY!)
+**Endpoint**: `GET https://database.example.com/api/v1/nodes` (default)
+
+You can configure a custom URL at compile time:
+
+```bash
+DATABASE_PORTAL_URL=https://your-api.com/api/v1/nodes cargo build --release
+```
+
+**Cache Behavior**:
+- Responses are cached in `/tmp/nodes_response.json`
+- Cache is valid for 24 hours
+- Stale cache triggers automatic re-fetch
 
 **Response Format**:
 ```json
