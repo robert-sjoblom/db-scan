@@ -1,0 +1,111 @@
+{
+    "id": 1201,
+    "name": "dev-pg-app011",
+    "env": "dev",
+    "nodes": [
+        {
+            "id": 1601,
+            "cluster_id": 1201,
+            "node_name": "dev-pg-app011-db002.sto1.example.com",
+            "pg_version": "15.14",
+            "ip_address": "127.1.12.161",
+            "role": {
+                "primary": {
+                    "health": {
+                        "timeline_id": 60,
+                        "uptime": "4 days 07:28:26.016649",
+                        "current_wal_lsn": "35B/520066A8",
+                        "configuration": {
+                            "max_wal_senders": "184",
+                            "wal_sender_timeout": "300000",
+                            "synchronous_commit": "remote_apply",
+                            "max_replication_slots": "180",
+                            "synchronous_standby_names": "ANY 1 ( dev_pg_app011_db001, dev_pg_app011_db003 )",
+                            "wal_level": "logical"
+                        },
+                        "replication": [
+                            {
+                                "pid": 2005912,
+                                "usesysid": 16388,
+                                "usename": "replicator",
+                                "application_name": "dev_pg_app011_db003",
+                                "client_addr": "127.2.12.161",
+                                "client_hostname": null,
+                                "client_port": 15562,
+                                "backend_start": "2025-09-16T22:45:51.702480Z",
+                                "backend_xmin": "115658408",
+                                "state": "streaming",
+                                "sent_lsn": "35B/520066A8",
+                                "write_lsn": "35B/520066A8",
+                                "flush_lsn": "35B/520066A8",
+                                "replay_lsn": "35B/520066A8",
+                                "write_lag": null,
+                                "flush_lag": null,
+                                "replay_lag": null,
+                                "sync_priority": 1,
+                                "sync_state": "quorum",
+                                "reply_time": "2025-09-20T19:04:03.640725Z"
+                            }
+                        ]
+                    }
+                }
+            },
+            "errors": []
+        },
+        {
+            "id": 1585,
+            "cluster_id": 1201,
+            "node_name": "dev-pg-app011-db003.sto2.example.com",
+            "pg_version": "15.14",
+            "ip_address": "127.2.12.161",
+            "role": {
+                "replica": {
+                    "health": {
+                        "wal_receiver": {
+                            "pid": 3337530,
+                            "status": "streaming",
+                            "receive_start_lsn": "356/B3000000",
+                            "receive_start_tli": 60,
+                            "written_lsn": "35B/52006778",
+                            "flushed_lsn": "35B/52006778",
+                            "received_tli": 60,
+                            "last_msg_send_time": "2025-09-20T19:04:04.644083Z",
+                            "last_msg_receipt_time": "2025-09-20T19:04:04.644435Z",
+                            "latest_end_lsn": "35B/52006778",
+                            "latest_end_time": "2025-09-20T19:04:04.644083Z",
+                            "slot_name": null,
+                            "sender_host": "127.1.12.161",
+                            "sender_port": 5432,
+                            "conninfo": "user=replicator passfile=/var/lib/pgsql/.pgpass channel_binding=prefer connect_timeout=2 dbname=replication host=127.1.12.161 port=5432 application_name=dev_pg_app011_db003 fallback_application_name=walreceiver sslmode=require sslcompression=0 sslsni=1 ssl_min_protocol_version=TLSv1.2 gssencmode=prefer krbsrvname=postgres target_session_attrs=any"
+                        },
+                        "lag": {
+                            "apply_lag_bytes": 0,
+                            "last_transaction_replay_at": "2025-09-20T19:04:04.643241Z"
+                        },
+                        "conflicts_by_db": {},
+                        "configuration": {
+                            "recovery_target_timeline": "latest",
+                            "primary_conninfo": "user=replicator connect_timeout=2 host=127.1.12.161 sslmode=require application_name=dev_pg_app011_db003",
+                            "hot_standby": "on",
+                            "primary_slot_name": ""
+                        }
+                    }
+                }
+            },
+            "errors": []
+        },
+        {
+            "id": 1628,
+            "cluster_id": 1201,
+            "node_name": "dev-pg-app011-db001.sto3.example.com",
+            "pg_version": "15.14",
+            "ip_address": "127.3.12.161",
+            "role": "unknown",
+            "errors": [
+                {
+                    "Postgres": "error connecting to server: connection timed out"
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,124 @@
+{
+    "id": 1312,
+    "name": "prod-pg-f3c265",
+    "env": "prod",
+    "nodes": [
+        {
+            "id": 1922,
+            "cluster_id": 1312,
+            "node_name": "prod-pg-f3c265-db002.sto1.example.com",
+            "pg_version": "17.6",
+            "ip_address": "127.1.19.9",
+            "role": {
+                "primary": {
+                    "health": {
+                        "timeline_id": 2,
+                        "uptime": "6 days 22:48:25.557346",
+                        "current_wal_lsn": "E6/DFB17368",
+                        "configuration": {
+                            "max_replication_slots": "10",
+                            "wal_level": "logical",
+                            "max_wal_senders": "10",
+                            "synchronous_standby_names": "ANY 1 ( prod_pg_f3c265_db001, prod_pg_f3c265_db003 )",
+                            "synchronous_commit": "remote_apply",
+                            "wal_sender_timeout": "300000"
+                        },
+                        "replication": [
+                            {
+                                "pid": 729263,
+                                "usesysid": 16387,
+                                "usename": "replicator",
+                                "application_name": "prod_pg_f3c265_db003",
+                                "client_addr": "127.2.19.9",
+                                "client_hostname": null,
+                                "client_port": 29792,
+                                "backend_start": "2025-12-16T10:42:33.236734Z",
+                                "backend_xmin": "17978220",
+                                "state": "streaming",
+                                "sent_lsn": "E6/DFB17368",
+                                "write_lsn": "E6/DFB17368",
+                                "flush_lsn": "E6/DFB17368",
+                                "replay_lsn": "E6/DFB17368",
+                                "write_lag": "00:00:00.005105",
+                                "flush_lag": "00:00:00.006583",
+                                "replay_lag": "00:00:00.006594",
+                                "sync_priority": 1,
+                                "sync_state": "quorum",
+                                "reply_time": "2025-12-18T07:20:07.402213Z"
+                            }
+                        ]
+                    }
+                }
+            },
+            "errors": []
+        },
+        {
+            "id": 1920,
+            "cluster_id": 1312,
+            "node_name": "prod-pg-f3c265-db003.sto2.example.com",
+            "pg_version": "17.6",
+            "ip_address": "127.2.19.9",
+            "role": {
+                "replica": {
+                    "health": {
+                        "wal_receiver": {
+                            "pid": 546981,
+                            "status": "streaming",
+                            "receive_start_lsn": "E1/3E000000",
+                            "receive_start_tli": 2,
+                            "written_lsn": "E6/DFB17368",
+                            "flushed_lsn": "E6/DFB17368",
+                            "received_tli": 2,
+                            "last_msg_send_time": "2025-12-18T07:20:07.398016Z",
+                            "last_msg_receipt_time": "2025-12-18T07:20:07.400663Z",
+                            "latest_end_lsn": "E6/DFB17368",
+                            "latest_end_time": "2025-12-18T07:20:07.398016Z",
+                            "slot_name": null,
+                            "sender_host": "127.1.19.9",
+                            "sender_port": 5432,
+                            "conninfo": "user=replicator passfile=/var/lib/pgsql/.pgpass channel_binding=prefer connect_timeout=2 dbname=replication host=127.1.19.9 port=5432 application_name=prod_pg_f3c265_db003 fallback_application_name=walreceiver sslmode=require sslnegotiation=postgres sslcompression=0 sslcertmode=allow sslsni=1 ssl_min_protocol_version=TLSv1.2 gssencmode=prefer krbsrvname=postgres gssdelegation=0 target_session_attrs=any load_balance_hosts=disable"
+                        },
+                        "lag": {
+                            "apply_lag_bytes": 0,
+                            "last_transaction_replay_at": "2025-12-18T07:20:07.397178Z"
+                        },
+                        "conflicts_by_db": {},
+                        "configuration": {
+                            "hot_standby": "on",
+                            "primary_conninfo": "user=replicator connect_timeout=2 host=127.1.19.9 sslmode=require application_name=prod_pg_f3c265_db003",
+                            "primary_slot_name": "",
+                            "recovery_target_timeline": "latest"
+                        }
+                    }
+                }
+            },
+            "errors": []
+        },
+        {
+            "id": 1921,
+            "cluster_id": 1312,
+            "node_name": "prod-pg-f3c265-db001.sto3.example.com",
+            "pg_version": "17.6",
+            "ip_address": "127.3.19.9",
+            "role": {
+                "replica": {
+                    "health": {
+                        "wal_receiver": null,
+                        "lag": {
+                            "apply_lag_bytes": null,
+                            "last_transaction_replay_at": "2025-11-22T22:48:26.190197Z"
+                        },
+                        "conflicts_by_db": {},
+                        "configuration": {
+                            "recovery_target_timeline": "latest",
+                            "primary_conninfo": "user=replicator connect_timeout=2 host=127.1.19.9 port=5432 application_name=prod_pg_f3c265_db001",
+                            "primary_slot_name": "",
+                            "hot_standby": "on"
+                        }
+                    }
+                }
+            },
+            "errors": []
+        }
+    ]
+}
