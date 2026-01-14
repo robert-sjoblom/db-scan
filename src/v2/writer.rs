@@ -260,13 +260,17 @@ fn get_connected_replicas(primary: Option<&crate::v2::scan::AnalyzedNode>) -> St
 
 /// Format a list of replication connections as a comma-separated string of db numbers.
 /// Deduplicates connections with the same application_name and client_addr.
+/// Shows lag for backup operations (pg_basebackup, etc.)
 fn format_replica_list(
     replication: &[crate::v2::scan::health_check_primary::ReplicationConnection],
 ) -> String {
     use std::collections::HashMap;
 
-    // Group by (application_name, client_addr) and count occurrences
-    let mut grouped: HashMap<(String, Option<String>), usize> = HashMap::new();
+    // Group by (application_name, client_addr) and collect connections
+    let mut grouped: HashMap<
+        (String, Option<String>),
+        Vec<&crate::v2::scan::health_check_primary::ReplicationConnection>,
+    > = HashMap::new();
     let mut order: Vec<(String, Option<String>)> = Vec::new();
 
     for conn in replication {
@@ -274,18 +278,39 @@ fn format_replica_list(
         if !grouped.contains_key(&key) {
             order.push(key.clone());
         }
-        *grouped.entry(key).or_insert(0) += 1;
+        grouped.entry(key).or_default().push(conn);
     }
 
     let connected: Vec<String> = order
         .iter()
         .map(|(app_name, client_addr)| {
             let normalized = normalize_application_name(app_name);
-            let count = grouped[&(app_name.clone(), client_addr.clone())];
-            if count > 1 {
-                format!("{}(×{})", normalized, count)
+            let conns = &grouped[&(app_name.clone(), client_addr.clone())];
+            let count = conns.len();
+
+            // For backup operations, show lag based on time (more accurate for backup progress)
+            let is_backup = matches!(
+                app_name.as_str(),
+                "pg_basebackup" | "pg_dump" | "pg_dumpall"
+            );
+            let lag_info = if is_backup {
+                // For pg_basebackup, use time-based replay_lag to estimate data volume
+                // LSN differences don't represent actual backup progress accurately
+                let max_lag = conns
+                    .iter()
+                    .filter_map(|c| c.replay_lag.as_deref())
+                    .filter_map(parse_lag_to_bytes)
+                    .max();
+
+                max_lag.map(|lag| format!(" ~{} behind", format_bytes(lag)))
             } else {
-                normalized
+                None
+            };
+
+            if count > 1 {
+                format!("{}(×{}{})", normalized, count, lag_info.unwrap_or_default())
+            } else {
+                format!("{}{}", normalized, lag_info.unwrap_or_default())
             }
         })
         .collect();
@@ -294,6 +319,43 @@ fn format_replica_list(
         "-".to_string()
     } else {
         connected.join(",")
+    }
+}
+
+/// Parse PostgreSQL interval lag to estimated bytes
+/// Used for backup operations where time-based lag is more accurate than LSN diff
+fn parse_lag_to_bytes(lag: &str) -> Option<u64> {
+    // Format: HH:MM:SS.microseconds
+    let parts: Vec<&str> = lag.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    let hours: u64 = parts[0].parse().ok()?;
+    let minutes: u64 = parts[1].parse().ok()?;
+    let seconds_parts: Vec<&str> = parts[2].split('.').collect();
+    let seconds: u64 = seconds_parts[0].parse().ok()?;
+
+    let total_seconds = hours * 3600 + minutes * 60 + seconds;
+
+    // Rough estimate: 16MB/s WAL generation rate
+    Some(total_seconds * 16_000_000)
+}
+
+/// Format bytes in a human-readable format (KB, MB, GB)
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1}GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1}MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1}KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{}B", bytes)
     }
 }
 
@@ -489,10 +551,38 @@ fn build_terminal_output(rows: &[OutputRow], options: &WriterOptions) -> String 
     }
 
     let use_color = !options.no_color && std::io::stdout().is_terminal();
+
+    // Calculate column widths
+    let mut max_cluster = "CLUSTER".len();
+    let mut max_primary = "PRIMARY".len();
+    let mut max_replicas = "REPLICAS".len();
+    let mut max_lag = "LAG".len();
+    let mut max_reason = "REASON".len();
+
+    for row in rows {
+        max_cluster = max_cluster.max(row.cluster.len());
+        max_primary = max_primary.max(row.primary.len());
+        max_replicas = max_replicas.max(row.replicas.len());
+        max_lag = max_lag.max(format_lag(row.lag).len());
+        max_reason = max_reason.max(row.reason.len());
+    }
+
     let mut output = String::new();
 
     // Header
-    output.push_str("STATUS\tCLUSTER\tPRIMARY\tREPLICAS\tLAG\tREASON\n");
+    output.push_str(&format!(
+        "{:<8} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {}\n",
+        "STATUS",
+        "CLUSTER",
+        "PRIMARY",
+        "REPLICAS",
+        "LAG",
+        "REASON",
+        width_cluster = max_cluster,
+        width_primary = max_primary,
+        width_replicas = max_replicas,
+        width_lag = max_lag,
+    ));
 
     // Rows
     for row in rows {
@@ -507,14 +597,26 @@ fn build_terminal_output(rows: &[OutputRow], options: &WriterOptions) -> String 
             row.status.as_str().to_string()
         };
 
+        // Add padding for color codes (they don't count toward visible width)
+        let status_padding = if use_color {
+            8 + row.status.color().len() + colors::RESET.len()
+        } else {
+            8
+        };
+
         output.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{:<status_padding$} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {}\n",
             status_str,
             row.cluster,
             row.primary,
             row.replicas,
             format_lag(row.lag),
-            row.reason
+            row.reason,
+            status_padding = status_padding,
+            width_cluster = max_cluster,
+            width_primary = max_primary,
+            width_replicas = max_replicas,
+            width_lag = max_lag,
         ));
     }
 

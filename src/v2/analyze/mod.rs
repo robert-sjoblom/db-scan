@@ -188,12 +188,31 @@ fn is_failover_node(node_name: &str) -> bool {
 }
 
 /// Calculate maximum replication lag from primary health data
+/// Only considers actual replica connections, excludes backup operations (pg_basebackup, etc.)
 fn calculate_max_lag(primary: &AnalyzedNode) -> u64 {
     if let Role::Primary { health } = &primary.role {
+        // Calculate lag from LSN differences (sent_lsn - replay_lsn)
+        // This is the actual byte lag, not a time-based estimate
         health
             .replication
             .iter()
-            .filter_map(|r| parse_lag_to_bytes(r.replay_lag.as_deref()))
+            .filter(|r| {
+                // Only include actual streaming replicas, exclude backup operations
+                r.state == "streaming"
+                    && !matches!(
+                        r.application_name.as_str(),
+                        "pg_basebackup" | "pg_dump" | "pg_dumpall"
+                    )
+            })
+            .filter_map(|r| {
+                // For streaming replicas, use replay_lsn (or flush_lsn as fallback)
+                let effective_lsn = r.replay_lsn.as_deref().or(r.flush_lsn.as_deref());
+                if let (Some(sent), Some(replay)) = (r.sent_lsn.as_deref(), effective_lsn) {
+                    pg_lsn_diff(sent, replay)
+                } else {
+                    None
+                }
+            })
             .max()
             .unwrap_or(0)
     } else {
@@ -561,25 +580,25 @@ fn resolve_split_brain(primaries: &[&AnalyzedNode], replicas: &[&AnalyzedNode]) 
     determine_true_primary(timeline_info, replicas_following)
 }
 
-/// Parse PostgreSQL interval lag (e.g., "00:00:00.001234") to estimated bytes
-/// This is a rough approximation - lag in bytes would need LSN comparison
-fn parse_lag_to_bytes(lag: Option<&str>) -> Option<u64> {
-    let lag = lag?;
-    // Format: HH:MM:SS.microseconds
-    let parts: Vec<&str> = lag.split(':').collect();
-    if parts.len() != 3 {
-        return None;
+/// Calculate byte difference between two PostgreSQL LSNs
+/// LSN format: "XXX/YYYYYYYY" where both parts are hexadecimal
+/// Returns None if LSNs are invalid
+fn pg_lsn_diff(lsn1: &str, lsn2: &str) -> Option<u64> {
+    fn parse_lsn(lsn: &str) -> Option<u64> {
+        let parts: Vec<&str> = lsn.split('/').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let high = u64::from_str_radix(parts[0], 16).ok()?;
+        let low = u64::from_str_radix(parts[1], 16).ok()?;
+        Some((high << 32) | low)
     }
 
-    let hours: u64 = parts[0].parse().ok()?;
-    let minutes: u64 = parts[1].parse().ok()?;
-    let seconds_parts: Vec<&str> = parts[2].split('.').collect();
-    let seconds: u64 = seconds_parts[0].parse().ok()?;
+    let pos1 = parse_lsn(lsn1)?;
+    let pos2 = parse_lsn(lsn2)?;
 
-    let total_seconds = hours * 3600 + minutes * 60 + seconds;
-
-    // Rough estimate: 16MB/s WAL generation rate
-    Some(total_seconds * 16_000_000)
+    // Return absolute difference
+    Some(pos1.abs_diff(pos2))
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -919,6 +938,25 @@ mod cluster_state_tests {
 
         /// Build the `PrimaryHealthCheckResult`.
         fn build(self) -> PrimaryHealthCheckResult {
+            // If there's high lag specified (>= 5 seconds), create lagging LSN values
+            // Base LSN: 48F/6957B540
+            let base_lsn = "48F/6957B540";
+            let has_high_lag = self.replay_lag.as_ref().map_or(false, |lag| {
+                // Parse lag to check if it's >= 5 seconds
+                if let Some(seconds) = parse_lag_seconds(lag) {
+                    seconds >= 5
+                } else {
+                    false
+                }
+            });
+
+            let lagging_lsn = if has_high_lag {
+                // Create lag of ~100MB (which would be ~6.25 seconds at 16MB/s)
+                "48F/6357B540" // ~100MB behind
+            } else {
+                base_lsn
+            };
+
             let replication: Vec<ReplicationConnection> = (0..self.replication_count)
                 .map(|i| ReplicationConnection {
                     pid: 1000 + i as i32,
@@ -931,10 +969,10 @@ mod cluster_state_tests {
                     backend_start: Utc::now(),
                     backend_xmin: Some("621647066".to_string()),
                     state: "streaming".to_string(),
-                    sent_lsn: Some("48F/6957B540".to_string()),
-                    write_lsn: Some("48F/6957B540".to_string()),
-                    flush_lsn: Some("48F/6957B540".to_string()),
-                    replay_lsn: Some("48F/6957B540".to_string()),
+                    sent_lsn: Some(base_lsn.to_string()),
+                    write_lsn: Some(lagging_lsn.to_string()),
+                    flush_lsn: Some(lagging_lsn.to_string()),
+                    replay_lsn: Some(lagging_lsn.to_string()),
                     write_lag: Some("00:00:00.000354".to_string()),
                     flush_lag: Some("00:00:00.000895".to_string()),
                     replay_lag: self.replay_lag.clone(),
@@ -947,11 +985,24 @@ mod cluster_state_tests {
             PrimaryHealthCheckResult {
                 timeline_id: self.timeline_id,
                 uptime: "26 days 14:39:06.703824".to_string(),
-                current_wal_lsn: "48F/6957B540".to_string(),
+                current_wal_lsn: base_lsn.to_string(),
                 configuration: self.configuration,
                 replication,
             }
         }
+    }
+
+    // Helper function to parse lag string to seconds
+    fn parse_lag_seconds(lag: &str) -> Option<u64> {
+        let parts: Vec<&str> = lag.split(':').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let hours: u64 = parts[0].parse().ok()?;
+        let minutes: u64 = parts[1].parse().ok()?;
+        let seconds_parts: Vec<&str> = parts[2].split('.').collect();
+        let seconds: u64 = seconds_parts[0].parse().ok()?;
+        Some(hours * 3600 + minutes * 60 + seconds)
     }
 
     // Convenience functions that use the builder internally
@@ -1471,9 +1522,9 @@ mod cluster_state_tests {
         ]);
 
         let actual = analyze(cluster.clone());
-        // 10 seconds * 16MB/s = 160,000,000 bytes
+        // LSN diff: 48F/6957B540 - 48F/6357B540 = 0x06000000 = 100,663,296 bytes (~96MB)
         let expected = ClusterHealth::Degraded {
-            lag: 160_000_000,
+            lag: 100_663_296,
             cluster: AnalyzedCluster { cluster },
             reason: Reason::HighReplicationLag,
         };
