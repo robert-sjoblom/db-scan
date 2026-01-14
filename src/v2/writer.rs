@@ -259,12 +259,35 @@ fn get_connected_replicas(primary: Option<&crate::v2::scan::AnalyzedNode>) -> St
 }
 
 /// Format a list of replication connections as a comma-separated string of db numbers.
+/// Deduplicates connections with the same application_name and client_addr.
 fn format_replica_list(
     replication: &[crate::v2::scan::health_check_primary::ReplicationConnection],
 ) -> String {
-    let connected: Vec<String> = replication
+    use std::collections::HashMap;
+
+    // Group by (application_name, client_addr) and count occurrences
+    let mut grouped: HashMap<(String, Option<String>), usize> = HashMap::new();
+    let mut order: Vec<(String, Option<String>)> = Vec::new();
+
+    for conn in replication {
+        let key = (conn.application_name.clone(), conn.client_addr.clone());
+        if !grouped.contains_key(&key) {
+            order.push(key.clone());
+        }
+        *grouped.entry(key).or_insert(0) += 1;
+    }
+
+    let connected: Vec<String> = order
         .iter()
-        .map(|r| normalize_application_name(&r.application_name))
+        .map(|(app_name, client_addr)| {
+            let normalized = normalize_application_name(app_name);
+            let count = grouped[&(app_name.clone(), client_addr.clone())];
+            if count > 1 {
+                format!("{}(×{})", normalized, count)
+            } else {
+                normalized
+            }
+        })
         .collect();
 
     if connected.is_empty() {
