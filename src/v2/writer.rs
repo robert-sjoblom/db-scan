@@ -336,8 +336,9 @@ fn compute_backup_lag_display(app_name: &str, conns: &[&ReplicationConnection]) 
         return None;
     }
 
-    // Use time-based replay_lag to estimate data volume
-    // (LSN differences don't represent actual backup progress accurately)
+    // Note: replay_lag shows time since backup started, NOT actual backup progress.
+    // pg_stat_replication doesn't track file copy progress, only WAL streaming lag.
+    // This is a rough estimate based on time elapsed since backup connection began.
     conns
         .iter()
         .filter_map(|c| c.replay_lag.as_deref())
