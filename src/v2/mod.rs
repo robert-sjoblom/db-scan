@@ -2,6 +2,8 @@ pub mod analyze;
 pub mod cluster;
 pub mod db;
 pub mod node;
+#[cfg(feature = "prometheus")]
+pub mod prometheus;
 pub mod scan;
 pub mod writer;
 
