@@ -54,6 +54,8 @@ pub struct PrimaryHealthCheckResult {
     pub current_wal_lsn: String,
     pub configuration: HashMap<String, String>,
     pub replication: Vec<ReplicationConnection>,
+    /// Total size of all databases on this primary, in bytes
+    pub total_db_size_bytes: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -124,7 +126,8 @@ static HEALTH_CHECK_PRIMARY_QUERY: &str = "SELECT jsonb_build_object(
             FROM
                 pg_stat_replication
         ) t
-    )
+    ),
+    'total_db_size_bytes', (SELECT SUM(pg_database_size(datname))::bigint FROM pg_database WHERE datname NOT IN ('template0', 'template1'))
 )::text;";
 
 #[instrument(skip(client, tx), level = "debug", fields(node_name = %node.node_name))]
@@ -209,6 +212,7 @@ mod tests {
     #[test]
     fn test_deserialize_with_pg_basebackup_null_lsn() {
         let json_data = r#"{
+            "total_db_size_bytes": 524288000000,
             "uptime": "34 days 02:38:05.573646",
             "replication": [
                 {
@@ -225,7 +229,7 @@ mod tests {
                     "replay_lsn": null,
                     "reply_time": "2026-01-14T11:32:53.073391+01:00",
                     "sync_state": "async",
-                    "client_addr": "10.83.17.8",
+                    "client_addr": "127.3.17.8",
                     "client_port": 26836,
                     "backend_xmin": null,
                     "backend_start": "2026-01-14T11:17:39.104304+01:00",
@@ -269,7 +273,7 @@ mod tests {
                     "replay_lsn": null,
                     "reply_time": null,
                     "sync_state": "async",
-                    "client_addr": "10.83.17.8",
+                    "client_addr": "127.3.17.8",
                     "client_port": 18238,
                     "backend_xmin": null,
                     "backend_start": "2026-01-14T11:09:57.350319+01:00",
@@ -342,6 +346,7 @@ mod tests {
     #[test]
     fn test_deserialize_normal_replication_connection() {
         let json_data = r#"{
+            "total_db_size_bytes": 1073741824,
             "uptime": "1 day 00:00:00",
             "replication": [
                 {

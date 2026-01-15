@@ -2,6 +2,8 @@ pub mod analyze;
 pub mod cluster;
 pub mod db;
 pub mod node;
+#[cfg(feature = "prometheus")]
+pub mod prometheus;
 pub mod scan;
 pub mod writer;
 
@@ -123,6 +125,7 @@ mod tests_common {
                 current_wal_lsn: self.current_wal_lsn.clone(),
                 configuration: self.configuration.clone(),
                 replication: self.replication.clone(),
+                total_db_size_bytes: self.total_db_size_bytes,
             }
         }
     }

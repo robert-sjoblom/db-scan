@@ -23,6 +23,7 @@
                             "synchronous_commit": "remote_apply",
                             "wal_sender_timeout": "300000"
                         },
+                        "total_db_size_bytes": 1073741824,
                         "replication": [
                             {
                                 "pid": 729263,

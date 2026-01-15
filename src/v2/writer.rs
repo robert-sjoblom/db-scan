@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, HashMap},
     fs::File,
     io::{BufWriter, IsTerminal, Write},
     path::Path,
@@ -6,8 +7,9 @@ use std::{
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::v2::analyze::{
-    AnalyzedCluster, ClusterHealth, Reason, SplitBrainInfo, SplitBrainResolution,
+use crate::v2::{
+    analyze::{AnalyzedCluster, ClusterHealth, Reason, SplitBrainInfo, SplitBrainResolution},
+    scan::health_check_primary::ReplicationConnection,
 };
 
 /// ANSI color codes for terminal output
@@ -33,7 +35,7 @@ pub struct WriterOptions {
 }
 
 /// A row of output data extracted from ClusterHealth
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 struct OutputRow {
     status: Status,
     cluster: String,
@@ -44,12 +46,26 @@ struct OutputRow {
     details_json: String,
 }
 
+impl Ord for OutputRow {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.status
+            .cmp(&other.status)
+            .then_with(|| self.cluster.cmp(&other.cluster))
+    }
+}
+
+impl PartialOrd for OutputRow {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Status {
-    Critical = 0,
-    Degraded = 1,
-    Unknown = 2,
-    Healthy = 3,
+    Healthy = 0,
+    Unknown = 1,
+    Degraded = 2,
+    Critical = 3,
 }
 
 impl Status {
@@ -152,8 +168,8 @@ pub async fn write_results(
         }
     }
 
-    // Sort by severity (Critical first, then Degraded, Unknown, Healthy)
-    rows.sort_by(|a, b| a.status.cmp(&b.status));
+    // Sort by severity (Healthy first, then Unknown, Degraded, Critical), then cluster alphabetically
+    rows.sort();
 
     build_terminal_output(&rows, &options)
 }
@@ -242,7 +258,7 @@ fn extract_primary_and_replicas(cluster: &AnalyzedCluster) -> (String, String) {
         .map(|n| extract_db_number(&n.node_name))
         .unwrap_or_else(|| "(none)".to_string());
 
-    let replicas = get_connected_replicas(primary_node);
+    let replicas = get_connected_replicas(primary_node, &cluster.backup_progress);
 
     (primary_short, replicas)
 }
@@ -251,75 +267,115 @@ fn extract_primary_and_replicas(cluster: &AnalyzedCluster) -> (String, String) {
 ///
 /// Returns a comma-separated list of replica db numbers (e.g., "db002,db003")
 /// or "-" if no primary or no connected replicas.
-fn get_connected_replicas(primary: Option<&crate::v2::scan::AnalyzedNode>) -> String {
+fn get_connected_replicas(
+    primary: Option<&crate::v2::scan::AnalyzedNode>,
+    backup_progress: &HashMap<String, u16>,
+) -> String {
     primary
         .and_then(|p| p.role.as_primary())
-        .map(|health| format_replica_list(&health.replication))
+        .map(|health| format_replica_list(&health.replication, backup_progress))
         .unwrap_or_else(|| "-".to_string())
 }
 
 /// Format a list of replication connections as a comma-separated string of db numbers.
 /// Deduplicates connections with the same application_name and client_addr.
 /// Shows lag for backup operations (pg_basebackup, etc.)
+/// Output is sorted by (application_name, client_addr) for deterministic results.
 fn format_replica_list(
     replication: &[crate::v2::scan::health_check_primary::ReplicationConnection],
+    backup_progress: &HashMap<String, u16>,
 ) -> String {
-    use std::collections::HashMap;
-
-    // Group by (application_name, client_addr) and collect connections
-    let mut grouped: HashMap<
-        (String, Option<String>),
-        Vec<&crate::v2::scan::health_check_primary::ReplicationConnection>,
-    > = HashMap::new();
-    let mut order: Vec<(String, Option<String>)> = Vec::new();
-
-    for conn in replication {
-        let key = (conn.application_name.clone(), conn.client_addr.clone());
-        if !grouped.contains_key(&key) {
-            order.push(key.clone());
-        }
-        grouped.entry(key).or_default().push(conn);
+    if replication.is_empty() {
+        return "-".to_string();
     }
 
-    let connected: Vec<String> = order
-        .iter()
-        .map(|(app_name, client_addr)| {
-            let normalized = normalize_application_name(app_name);
-            let conns = &grouped[&(app_name.clone(), client_addr.clone())];
-            let count = conns.len();
+    let grouped = group_connections_by_identity(replication);
 
-            // For backup operations, show lag based on time (more accurate for backup progress)
-            let is_backup = matches!(
-                app_name.as_str(),
-                "pg_basebackup" | "pg_dump" | "pg_dumpall"
-            );
-            let lag_info = if is_backup {
-                // For pg_basebackup, use time-based replay_lag to estimate data volume
-                // LSN differences don't represent actual backup progress accurately
-                let max_lag = conns
-                    .iter()
-                    .filter_map(|c| c.replay_lag.as_deref())
-                    .filter_map(parse_lag_to_bytes)
-                    .max();
-
-                max_lag.map(|lag| format!(" ~{} behind", format_bytes(lag)))
-            } else {
-                None
-            };
-
-            if count > 1 {
-                format!("{}(×{}{})", normalized, count, lag_info.unwrap_or_default())
-            } else {
-                format!("{}{}", normalized, lag_info.unwrap_or_default())
-            }
-        })
+    let formatted: Vec<String> = grouped
+        .into_iter()
+        .map(|((app_name, _), conns)| format_replica_entry(&app_name, &conns, backup_progress))
         .collect();
 
-    if connected.is_empty() {
+    if formatted.is_empty() {
         "-".to_string()
     } else {
-        connected.join(",")
+        formatted.join(",")
     }
+}
+
+type ConnectionKey = (String, Option<String>);
+
+/// Group connections by (application_name, client_addr), sorted for deterministic output.
+fn group_connections_by_identity(
+    replication: &[ReplicationConnection],
+) -> std::collections::BTreeMap<ConnectionKey, Vec<&ReplicationConnection>> {
+    let mut grouped: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for conn in replication {
+        let key = (conn.application_name.clone(), conn.client_addr.clone());
+        grouped.entry(key).or_default().push(conn);
+    }
+    grouped
+}
+
+/// Format a single replica entry with optional count and backup lag info.
+fn format_replica_entry(
+    app_name: &str,
+    conns: &[&ReplicationConnection],
+    backup_progress: &HashMap<String, u16>,
+) -> String {
+    let normalized = normalize_application_name(app_name);
+    let count = conns.len();
+    let lag_info = compute_backup_lag_display(app_name, conns, backup_progress);
+
+    match (count > 1, lag_info) {
+        (true, Some(lag)) => format!("{}(×{}{})", normalized, count, lag),
+        (true, None) => format!("{}(×{})", normalized, count),
+        (false, Some(lag)) => format!("{}{}", normalized, lag),
+        (false, None) => normalized,
+    }
+}
+
+/// For backup operations, compute a human-readable lag estimate.
+/// Returns None for non-backup operations or if no lag data is available.
+/// When prometheus feature is enabled and backup progress is available, shows actual progress.
+fn compute_backup_lag_display(
+    app_name: &str,
+    conns: &[&ReplicationConnection],
+    backup_progress: &HashMap<String, u16>,
+) -> Option<String> {
+    const BACKUP_APPS: &[&str] = &["pg_basebackup", "pg_dump", "pg_dumpall"];
+
+    if !BACKUP_APPS.contains(&app_name) {
+        return None;
+    }
+
+    // Try to use actual backup progress from Prometheus (when available)
+    // Progress is stored as percentage * 100 (e.g., 4156 = 41.56%)
+    // The HashMap is keyed by client_addr (IP address) for consistent lookup
+    let progress_from_prometheus = conns
+        .iter()
+        .filter_map(|c| {
+            c.client_addr
+                .as_ref()
+                .and_then(|addr| backup_progress.get(addr))
+        })
+        .max();
+
+    if let Some(&progress_pct_100) = progress_from_prometheus {
+        let pct = progress_pct_100 as f64 / 100.0;
+        return Some(format!(" ~{:.1}%", pct));
+    }
+
+    // Fallback: use time-based estimate from replay_lag
+    // Note: replay_lag shows time since backup started, NOT actual backup progress.
+    // pg_stat_replication doesn't track file copy progress, only WAL streaming lag.
+    // This is a rough estimate based on time elapsed since backup connection began.
+    conns
+        .iter()
+        .filter_map(|c| c.replay_lag.as_deref())
+        .filter_map(parse_lag_to_bytes)
+        .max()
+        .map(|lag| format!(" ~{} behind", format_bytes(lag)))
 }
 
 /// Parse PostgreSQL interval lag to estimated bytes
@@ -626,4 +682,89 @@ fn build_terminal_output(rows: &[OutputRow], options: &WriterOptions) -> String 
 /// Determine if a healthy cluster should be shown based on options
 fn should_show_healthy_cluster(options: &WriterOptions, failover: bool) -> bool {
     options.show_healthy || (failover && options.show_failover)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_output_row_ordering() {
+        let mut rows = [
+            OutputRow {
+                status: Status::Critical,
+                cluster: "cluster_a".to_string(),
+                primary: "db001".to_string(),
+                replicas: "db002".to_string(),
+                lag: None,
+                reason: "NoPrimary".to_string(),
+                details_json: "{}".to_string(),
+            },
+            OutputRow {
+                status: Status::Healthy,
+                cluster: "cluster_z".to_string(),
+                primary: "db001".to_string(),
+                replicas: "db002".to_string(),
+                lag: None,
+                reason: "-".to_string(),
+                details_json: "{}".to_string(),
+            },
+            OutputRow {
+                status: Status::Degraded,
+                cluster: "cluster_b".to_string(),
+                primary: "db001".to_string(),
+                replicas: "db002".to_string(),
+                lag: Some(1000),
+                reason: "HighReplicationLag".to_string(),
+                details_json: "{}".to_string(),
+            },
+            OutputRow {
+                status: Status::Healthy,
+                cluster: "cluster_a".to_string(),
+                primary: "db001".to_string(),
+                replicas: "db002".to_string(),
+                lag: None,
+                reason: "-".to_string(),
+                details_json: "{}".to_string(),
+            },
+            OutputRow {
+                status: Status::Unknown,
+                cluster: "cluster_c".to_string(),
+                primary: "-".to_string(),
+                replicas: "?/2 (1 reachable)".to_string(),
+                lag: None,
+                reason: "NoNodesReachable".to_string(),
+                details_json: "{}".to_string(),
+            },
+            OutputRow {
+                status: Status::Critical,
+                cluster: "cluster_b".to_string(),
+                primary: "db001".to_string(),
+                replicas: "-".to_string(),
+                lag: None,
+                reason: "WritesBlocked".to_string(),
+                details_json: "{}".to_string(),
+            },
+        ];
+
+        rows.sort();
+
+        assert_eq!(rows[0].status, Status::Healthy);
+        assert_eq!(rows[0].cluster, "cluster_a");
+
+        assert_eq!(rows[1].status, Status::Healthy);
+        assert_eq!(rows[1].cluster, "cluster_z");
+
+        assert_eq!(rows[2].status, Status::Unknown);
+        assert_eq!(rows[2].cluster, "cluster_c");
+
+        assert_eq!(rows[3].status, Status::Degraded);
+        assert_eq!(rows[3].cluster, "cluster_b");
+
+        assert_eq!(rows[4].status, Status::Critical);
+        assert_eq!(rows[4].cluster, "cluster_a");
+
+        assert_eq!(rows[5].status, Status::Critical);
+        assert_eq!(rows[5].cluster, "cluster_b");
+    }
 }

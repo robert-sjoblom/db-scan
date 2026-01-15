@@ -52,6 +52,10 @@ struct Args {
     #[arg(long)]
     show_failover: bool,
 
+    /// Silence tracing, useful when running a watch command
+    #[arg(long, short)]
+    silence_tracing: bool,
+
     /// Default user to use when not connecting with cert auth
     #[arg(long)]
     default_user: String,
@@ -74,7 +78,11 @@ async fn main() {
     let now = Instant::now();
 
     let args = Args::parse();
-    logging::setup(args.log_level.clone());
+
+    if !args.silence_tracing {
+        logging::setup(args.log_level.clone());
+    }
+
     tracing::trace!(args = ?args, "parsed command line arguments");
     v2::db::setup(&args);
 

@@ -1,0 +1,73 @@
+{
+  "http_interactions": [
+    {
+      "response": {
+        "body": {
+          "encoding": null,
+          "string": "{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":[{\"metric\":{\"__name__\":\"node_filesystem_size_bytes\",\"dc\":\"sto3\",\"device\":\"/dev/mapper/vg_pgsql-lv_pgsql\",\"fstype\":\"xfs\",\"host\":\"prod-pg-app008-db003.sto3.example.com\",\"instance\":\"127.3.17.8:9999\",\"job\":\"node\",\"mountpoint\":\"/var/lib/pgsql\",\"subnet\":\"127.3.16.0/22\",\"team\":\"sudo\"},\"value\":[1768474806.604,\"858553069568\"]}]}}"
+        },
+        "http_version": "1.1",
+        "status": {
+          "code": 200,
+          "message": "OK"
+        },
+        "headers": {
+          "date": [
+            "Thu, 15 Jan 2026 11:00:06 GMT"
+          ],
+          "content-length": [
+            "377"
+          ],
+          "content-type": [
+            "application/json"
+          ]
+        }
+      },
+      "request": {
+        "uri": "https://prometheus.example.com/api/v1/query?query=node_filesystem_size_bytes%7Bhost%3D%22prod-pg-app008-db003.sto3.example.com%22%2Cmountpoint%3D%22%2Fvar%2Flib%2Fpgsql%22%7D",
+        "body": {
+          "encoding": null,
+          "string": ""
+        },
+        "method": "get",
+        "headers": {}
+      },
+      "recorded_at": "Thu, 15 Jan 2026 11:00:06 +0000"
+    },
+    {
+      "response": {
+        "body": {
+          "encoding": null,
+          "string": "{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":[{\"metric\":{\"__name__\":\"node_filesystem_avail_bytes\",\"dc\":\"sto3\",\"device\":\"/dev/mapper/vg_pgsql-lv_pgsql\",\"fstype\":\"xfs\",\"host\":\"prod-pg-app008-db003.sto3.example.com\",\"instance\":\"127.3.17.8:9999\",\"job\":\"node\",\"mountpoint\":\"/var/lib/pgsql\",\"subnet\":\"127.3.16.0/22\",\"team\":\"sudo\"},\"value\":[1768474806.640,\"442926485504\"]}]}}"
+        },
+        "http_version": "1.1",
+        "status": {
+          "code": 200,
+          "message": "OK"
+        },
+        "headers": {
+          "content-type": [
+            "application/json"
+          ],
+          "date": [
+            "Thu, 15 Jan 2026 11:00:06 GMT"
+          ],
+          "content-length": [
+            "378"
+          ]
+        }
+      },
+      "request": {
+        "uri": "https://prometheus.example.com/api/v1/query?query=node_filesystem_avail_bytes%7Bhost%3D%22prod-pg-app008-db003.sto3.example.com%22%2Cmountpoint%3D%22%2Fvar%2Flib%2Fpgsql%22%7D",
+        "body": {
+          "encoding": null,
+          "string": ""
+        },
+        "method": "get",
+        "headers": {}
+      },
+      "recorded_at": "Thu, 15 Jan 2026 11:00:06 +0000"
+    }
+  ],
+  "recorded_with": "rVCR 0.2.2"
+}

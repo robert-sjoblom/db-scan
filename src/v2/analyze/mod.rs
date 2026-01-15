@@ -8,6 +8,9 @@ use crate::v2::{
     scan::{AnalyzedNode, Role},
 };
 
+#[cfg(feature = "prometheus")]
+use crate::v2::prometheus::client::{self, ClientWithMiddleware};
+
 /// WAL generation rate in bytes per second (approximately 16MB/s under typical load)
 const WAL_GENERATION_RATE_BYTES_PER_SEC: u64 = 16_000_000;
 /// Maximum acceptable replication lag in seconds
@@ -15,6 +18,22 @@ const LAG_THRESHOLD_SECONDS: u64 = 5;
 /// Replication lag threshold in bytes
 const LAG_THRESHOLD_BYTES: u64 = WAL_GENERATION_RATE_BYTES_PER_SEC * LAG_THRESHOLD_SECONDS;
 
+/// Async task that analyzes clusters and sends results through a channel.
+///
+/// This function receives [`Cluster`] instances from `cluster_rx`, enriches them with
+/// backup progress data (if the prometheus feature is enabled), performs health analysis,
+/// and sends the resulting [`ClusterHealth`] through `analyzed_tx`.
+///
+/// # Arguments
+///
+/// * `cluster_rx` - Receiver channel for clusters to analyze
+/// * `analyzed_tx` - Sender channel for analyzed cluster health results
+///
+/// # Behavior
+///
+/// The task runs until the `cluster_rx` channel is closed by the sender. Each received
+/// cluster is processed through [`analyze_with_enrichment`] which fetches backup progress
+/// data asynchronously before performing synchronous health analysis.
 #[instrument(skip_all, level = "info")]
 pub async fn analyze_clusters(
     mut cluster_rx: UnboundedReceiver<Cluster>,
@@ -22,8 +41,22 @@ pub async fn analyze_clusters(
 ) {
     tracing::info!("cluster analysis task started");
 
+    // Create shared HTTP client for prometheus queries
+    #[cfg(feature = "prometheus")]
+    let http_client = match client::create_client() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to create prometheus client, backup progress disabled");
+            None
+        }
+    };
+
     while let Some(cluster) = cluster_rx.recv().await {
-        let analyzed = analyze(cluster);
+        #[cfg(feature = "prometheus")]
+        let analyzed = analyze_with_enrichment(cluster, http_client.as_ref()).await;
+        #[cfg(not(feature = "prometheus"))]
+        let analyzed = analyze_with_enrichment(cluster).await;
+
         match analyzed_tx.send(analyzed) {
             Ok(_) => tracing::trace!("sent analyzed cluster"),
             Err(e) => tracing::error!(error = %e, "failed to send analyzed cluster"),
@@ -35,7 +68,145 @@ pub async fn analyze_clusters(
     }
 }
 
-fn analyze(cluster: Cluster) -> ClusterHealth {
+#[cfg(not(feature = "prometheus"))]
+/// Async wrapper that fetches backup progress before analyzing
+async fn analyze_with_enrichment(cluster: Cluster) -> ClusterHealth {
+    analyze(cluster, HashMap::new())
+}
+
+#[cfg(feature = "prometheus")]
+/// Async wrapper that fetches backup progress before analyzing
+async fn analyze_with_enrichment(
+    cluster: Cluster,
+    http_client: Option<&ClientWithMiddleware>,
+) -> ClusterHealth {
+    let backup_progress = fetch_backup_progress(&cluster, http_client).await;
+    tracing::debug!(backup_progress = ?backup_progress, cluster = cluster.name, "fetched backup progress for cluster");
+    analyze(cluster, backup_progress)
+}
+
+#[cfg(feature = "prometheus")]
+/// Fetch backup progress for any pg_basebackup connections on the primary
+async fn fetch_backup_progress(
+    cluster: &Cluster,
+    http_client: Option<&ClientWithMiddleware>,
+) -> HashMap<String, u16> {
+    use crate::v2::scan::Role;
+
+    let mut progress = HashMap::new();
+
+    // No client available, skip prometheus queries
+    let http_client = match http_client {
+        Some(c) => c,
+        None => {
+            tracing::debug!("no prometheus client available");
+            return progress;
+        }
+    };
+
+    // Find the primary node
+    let primary = match cluster.primary() {
+        Some(p) => p,
+        None => {
+            tracing::debug!("no primary node found in cluster");
+            return progress;
+        }
+    };
+
+    // Get primary DB size and replication connections
+    let (total_db_size, replication_conns) = match &primary.role {
+        Role::Primary { health } => (health.total_db_size_bytes, &health.replication),
+        _ => {
+            tracing::debug!("primary node has no health data");
+            return progress;
+        }
+    };
+
+    tracing::debug!(
+        replication_count = replication_conns.len(),
+        total_db_size = total_db_size,
+        "checking replication connections for pg_basebackup"
+    );
+
+    // Build a map of IP address to hostname from cluster nodes for fallback lookup
+    let ip_to_hostname: HashMap<String, String> = cluster
+        .nodes
+        .iter()
+        .map(|n| (n.ip_address.to_string(), n.node_name.clone()))
+        .collect();
+
+    tracing::debug!(
+        ip_mapping_count = ip_to_hostname.len(),
+        "built ip-to-hostname lookup map"
+    );
+
+    // For each pg_basebackup connection, fetch replica filesystem usage
+    for conn in replication_conns {
+        if conn.application_name == "pg_basebackup" {
+            tracing::debug!(
+                pid = conn.pid,
+                state = %conn.state,
+                client_addr = ?conn.client_addr,
+                client_hostname = ?conn.client_hostname,
+                "found pg_basebackup connection"
+            );
+
+            // Try client_hostname first, fall back to looking up by IP
+            let hostname = conn
+                .client_hostname
+                .as_ref()
+                .or_else(|| {
+                    conn.client_addr
+                        .as_ref()
+                        .and_then(|ip| ip_to_hostname.get(ip))
+                })
+                .cloned();
+
+            if hostname.is_none() {
+                tracing::debug!(
+                    client_addr = ?conn.client_addr,
+                    "pg_basebackup connection has no resolvable hostname"
+                );
+            }
+            let hostname = hostname.unwrap();
+
+            tracing::debug!(
+                hostname = %hostname,
+                source = if conn.client_hostname.is_some() { "client_hostname" } else { "ip_lookup" },
+                "resolved hostname for pg_basebackup connection"
+            );
+
+            match client::get_filesystem_used_bytes(&hostname, "/var/lib/pgsql", Some(http_client))
+                .await
+            {
+                Ok(used_bytes) => {
+                    let progress_pct = estimate_backup_progress(used_bytes, total_db_size as u64);
+                    tracing::debug!(
+                        hostname = %hostname,
+                        used_bytes = used_bytes,
+                        progress_pct = progress_pct,
+                        "calculated backup progress"
+                    );
+                    // Key by client_addr (IP) for consistent lookup in writer
+                    if let Some(ref client_addr) = conn.client_addr {
+                        progress.insert(client_addr.clone(), progress_pct);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        hostname = %hostname,
+                        error = %e,
+                        "failed to fetch backup progress from prometheus"
+                    );
+                }
+            }
+        }
+    }
+
+    progress
+}
+
+fn analyze(cluster: Cluster, backup_progress: HashMap<String, u16>) -> ClusterHealth {
     let primaries: Vec<_> = cluster.primaries().collect();
     let replicas: Vec<_> = cluster.replicas().collect();
 
@@ -44,7 +215,10 @@ fn analyze(cluster: Cluster) -> ClusterHealth {
     // Zero nodes reachable - truly unknown state
     if reachable_count == 0 {
         return ClusterHealth::Unknown {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress,
+            },
             reachable_nodes: 0,
             reason: Reason::NoNodesReachable,
         };
@@ -53,7 +227,10 @@ fn analyze(cluster: Cluster) -> ClusterHealth {
     // No primaries found - Critical state (even if we only see replicas)
     if primaries.is_empty() {
         return ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress,
+            },
             reason: Reason::NoPrimary,
         };
     }
@@ -62,7 +239,10 @@ fn analyze(cluster: Cluster) -> ClusterHealth {
     if primaries.len() > 1 {
         let split_brain_info = resolve_split_brain(&primaries, &replicas);
         return ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress,
+            },
             reason: Reason::SplitBrain(split_brain_info),
         };
     }
@@ -93,15 +273,19 @@ fn analyze(cluster: Cluster) -> ClusterHealth {
     match replicas.len() {
         2 => analyze_full_redundancy(
             cluster,
+            backup_progress,
             failover,
             max_lag,
             rebuilding_count,
             chained_replica,
         ),
-        1 => analyze_one_replica_down(cluster, max_lag),
-        0 => analyze_no_replicas(cluster, sync_commit_off),
+        1 => analyze_one_replica_down(cluster, backup_progress, max_lag),
+        0 => analyze_no_replicas(cluster, backup_progress, sync_commit_off),
         _ => ClusterHealth::Unknown {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress,
+            },
             reachable_nodes: reachable_count,
             reason: Reason::UnexpectedTopology,
         },
@@ -113,6 +297,7 @@ fn analyze(cluster: Cluster) -> ClusterHealth {
 /// Returns Healthy if all conditions are met, otherwise Degraded with appropriate reason.
 fn analyze_full_redundancy(
     cluster: Cluster,
+    backup_progress: HashMap<String, u16>,
     failover: bool,
     max_lag: u64,
     rebuilding_count: usize,
@@ -122,7 +307,10 @@ fn analyze_full_redundancy(
     if rebuilding_count > 0 {
         return ClusterHealth::Degraded {
             lag: max_lag,
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress,
+            },
             reason: Reason::RebuildingReplica,
         };
     }
@@ -130,7 +318,10 @@ fn analyze_full_redundancy(
     if max_lag > LAG_THRESHOLD_BYTES {
         return ClusterHealth::Degraded {
             lag: max_lag,
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress,
+            },
             reason: Reason::HighReplicationLag,
         };
     }
@@ -139,7 +330,10 @@ fn analyze_full_redundancy(
         // Chained replication is a degraded topology (less redundancy)
         return ClusterHealth::Degraded {
             lag: max_lag,
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress,
+            },
             reason: Reason::ChainedReplica {
                 chained_replica: chained.chained_replica,
                 upstream_replica: chained.upstream_replica,
@@ -149,17 +343,27 @@ fn analyze_full_redundancy(
 
     ClusterHealth::Healthy {
         failover,
-        cluster: AnalyzedCluster { cluster },
+        cluster: AnalyzedCluster {
+            cluster,
+            backup_progress,
+        },
     }
 }
 
 /// Analyze a cluster with one replica down (1 replica visible).
 ///
 /// Always returns Degraded with OneReplicaDown reason.
-fn analyze_one_replica_down(cluster: Cluster, max_lag: u64) -> ClusterHealth {
+fn analyze_one_replica_down(
+    cluster: Cluster,
+    backup_progress: HashMap<String, u16>,
+    max_lag: u64,
+) -> ClusterHealth {
     ClusterHealth::Degraded {
         lag: max_lag,
-        cluster: AnalyzedCluster { cluster },
+        cluster: AnalyzedCluster {
+            cluster,
+            backup_progress,
+        },
         reason: Reason::OneReplicaDown,
     }
 }
@@ -167,14 +371,21 @@ fn analyze_one_replica_down(cluster: Cluster, max_lag: u64) -> ClusterHealth {
 /// Analyze a cluster with no replicas visible.
 ///
 /// Returns Critical with either WritesUnprotected (sync_commit=off) or WritesBlocked (sync_commit=on).
-fn analyze_no_replicas(cluster: Cluster, sync_commit_off: bool) -> ClusterHealth {
+fn analyze_no_replicas(
+    cluster: Cluster,
+    backup_progress: HashMap<String, u16>,
+    sync_commit_off: bool,
+) -> ClusterHealth {
     let reason = if sync_commit_off {
         Reason::WritesUnprotected
     } else {
         Reason::WritesBlocked
     };
     ClusterHealth::Critical {
-        cluster: AnalyzedCluster { cluster },
+        cluster: AnalyzedCluster {
+            cluster,
+            backup_progress,
+        },
         reason,
     }
 }
@@ -601,9 +812,27 @@ fn pg_lsn_diff(lsn1: &str, lsn2: &str) -> Option<u64> {
     Some(pos1.abs_diff(pos2))
 }
 
+#[cfg(feature = "prometheus")]
+/// Estimate pg_basebackup progress by comparing primary DB size vs replica filesystem usage
+/// Returns progress as u16 (percentage * 100, e.g., 4156 = 41.56%)
+///
+/// This is a rough estimate assuming the used bytes on the replica are mostly from the backup.
+/// This may be inaccurate if there's other data on the filesystem.
+fn estimate_backup_progress(replica_used_bytes: u64, primary_db_size: u64) -> u16 {
+    if primary_db_size == 0 {
+        return 0;
+    }
+
+    let progress = (replica_used_bytes as f64 / primary_db_size as f64) * 10000.0;
+    progress.min(10000.0) as u16
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct AnalyzedCluster {
     pub(crate) cluster: Cluster,
+    /// Backup progress for pg_basebackup connections, mapped by client_addr
+    /// Key: client IP address, Value: progress (pct * 100, e.g., 4156 = 41.56%)
+    pub backup_progress: HashMap<String, u16>,
 }
 
 impl AnalyzedCluster {
@@ -749,10 +978,13 @@ mod tests {
     fn test_healthy_cluster() {
         let cluster = healthy::non_failover_cluster();
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Healthy {
             failover: false,
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
         };
 
         assert_eq!(actual, expected);
@@ -761,10 +993,13 @@ mod tests {
     #[test]
     fn test_degraded_cluster_one_replica_down() {
         let cluster = unhealthy::db001_unreachable_failover_with_replica();
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Degraded {
             lag: 0,
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::OneReplicaDown,
         };
         assert_eq!(actual, expected);
@@ -775,10 +1010,13 @@ mod tests {
         // Scenario: db002 is primary (failover occurred), db003 is streaming replica,
         // db001 is online but rebuilding (wal_receiver = None, old last_transaction_replay_at)
         let cluster = unhealthy::db001_rebuilding_after_failover();
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Degraded {
             lag: 0,
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::RebuildingReplica,
         };
         assert_eq!(actual, expected);
@@ -788,10 +1026,13 @@ mod tests {
     fn test_degraded_cluster_chained_replica() {
         // Scenario: db001 is primary, db002 replicates from db001, db003 replicates from db002 (chained)
         let cluster = unhealthy::chained_replica();
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Degraded {
             lag: 0,
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::ChainedReplica {
                 chained_replica: "dev-pg-app001-db003.sto3.example.com".to_string(),
                 upstream_replica: "dev-pg-app001-db002.sto2.example.com".to_string(),
@@ -966,6 +1207,7 @@ mod cluster_state_tests {
                 current_wal_lsn: base_lsn.to_string(),
                 configuration: self.configuration,
                 replication,
+                total_db_size_bytes: 1073741824,
             }
         }
     }
@@ -1086,9 +1328,12 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Unknown {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reachable_nodes: 0,
             reason: Reason::NoNodesReachable,
         };
@@ -1111,9 +1356,12 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::WritesBlocked,
         };
 
@@ -1148,9 +1396,12 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::NoPrimary,
         };
 
@@ -1187,10 +1438,13 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         // Both primaries have same timeline, replica's sender_host matches db001's IP
         let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::SplitBrain(SplitBrainInfo {
                 true_primary: "dev-pg-app001-db001.sto1.example.com".to_string(),
                 stale_primaries: vec!["dev-pg-app001-db002.sto2.example.com".to_string()],
@@ -1227,9 +1481,12 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::SplitBrain(SplitBrainInfo {
                 // db001 is first in iteration order, but resolution is indeterminate
                 true_primary: "dev-pg-app001-db001.sto1.example.com".to_string(),
@@ -1263,9 +1520,12 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::SplitBrain(SplitBrainInfo {
                 true_primary: "dev-pg-app001-db002.sto2.example.com".to_string(),
                 stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_string()],
@@ -1336,9 +1596,12 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::SplitBrain(SplitBrainInfo {
                 true_primary: "dev-pg-app001-db002.sto2.example.com".to_string(),
                 stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_string()],
@@ -1413,11 +1676,14 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         // db001 is the true primary because the replica is following it,
         // even though db002 has a higher timeline
         let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::SplitBrain(SplitBrainInfo {
                 true_primary: "dev-pg-app001-db001.sto1.example.com".to_string(),
                 stale_primaries: vec!["dev-pg-app001-db002.sto2.example.com".to_string()],
@@ -1459,11 +1725,14 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         // 1 primary + 1 replica = Degraded with OneReplicaDown
         let expected = ClusterHealth::Degraded {
             lag: 0,
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::OneReplicaDown,
         };
 
@@ -1499,11 +1768,14 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         // LSN diff: 48F/6957B540 - 48F/6357B540 = 0x06000000 = 100,663,296 bytes (~96MB)
         let expected = ClusterHealth::Degraded {
             lag: 100_663_296,
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::HighReplicationLag,
         };
 
@@ -1538,10 +1810,13 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Healthy {
             failover: true,
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
         };
 
         assert_eq!(actual, expected);
@@ -1573,10 +1848,13 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Healthy {
             failover: true,
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
         };
 
         assert_eq!(actual, expected);
@@ -1603,9 +1881,12 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::WritesBlocked,
         };
 
@@ -1631,9 +1912,12 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::WritesUnprotected,
         };
 
@@ -1658,9 +1942,12 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone());
+        let actual = analyze(cluster.clone(), HashMap::new());
         let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster { cluster },
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
             reason: Reason::WritesUnprotected,
         };
 
@@ -1774,5 +2061,33 @@ mod cluster_state_tests {
         );
 
         assert!(!is_sync_commit_off(&node));
+    }
+
+    #[test]
+    #[cfg(feature = "prometheus")]
+    fn test_estimate_backup_progress() {
+        let replica_used_bytes = 415_626_584_064u64; // ~415 GB
+        let primary_db_size = 1_000_000_000_000u64; // 1 TB
+
+        let progress_pct = estimate_backup_progress(replica_used_bytes, primary_db_size);
+
+        // Expected progress: (415626584064 / 1000000000000) * 10000 = ~4156 (41.56%)
+        assert_eq!(progress_pct, 4156);
+    }
+
+    #[test]
+    #[cfg(feature = "prometheus")]
+    fn test_estimate_backup_progress_edge_cases() {
+        // Zero primary size
+        assert_eq!(estimate_backup_progress(100, 0), 0);
+
+        // Zero replica usage
+        assert_eq!(estimate_backup_progress(0, 1000), 0);
+
+        // 100% complete (100% = 10000)
+        assert_eq!(estimate_backup_progress(1000, 1000), 10000);
+
+        // Over 100% (more data on replica than primary DB, clamped to 10000)
+        assert_eq!(estimate_backup_progress(1500, 1000), 10000);
     }
 }
