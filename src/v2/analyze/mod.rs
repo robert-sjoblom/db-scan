@@ -8,6 +8,9 @@ use crate::v2::{
     scan::{AnalyzedNode, Role},
 };
 
+#[cfg(feature = "prometheus")]
+use crate::v2::prometheus::client::{self, ClientWithMiddleware};
+
 /// WAL generation rate in bytes per second (approximately 16MB/s under typical load)
 const WAL_GENERATION_RATE_BYTES_PER_SEC: u64 = 16_000_000;
 /// Maximum acceptable replication lag in seconds
@@ -38,8 +41,22 @@ pub async fn analyze_clusters(
 ) {
     tracing::info!("cluster analysis task started");
 
+    // Create shared HTTP client for prometheus queries
+    #[cfg(feature = "prometheus")]
+    let http_client = match client::create_client() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to create prometheus client, backup progress disabled");
+            None
+        }
+    };
+
     while let Some(cluster) = cluster_rx.recv().await {
+        #[cfg(feature = "prometheus")]
+        let analyzed = analyze_with_enrichment(cluster, http_client.as_ref()).await;
+        #[cfg(not(feature = "prometheus"))]
         let analyzed = analyze_with_enrichment(cluster).await;
+
         match analyzed_tx.send(analyzed) {
             Ok(_) => tracing::trace!("sent analyzed cluster"),
             Err(e) => tracing::error!(error = %e, "failed to send analyzed cluster"),
@@ -51,50 +68,130 @@ pub async fn analyze_clusters(
     }
 }
 
+#[cfg(not(feature = "prometheus"))]
 /// Async wrapper that fetches backup progress before analyzing
 async fn analyze_with_enrichment(cluster: Cluster) -> ClusterHealth {
-    let backup_progress = fetch_backup_progress(&cluster).await;
-    analyze(cluster, backup_progress)
+    analyze(cluster, HashMap::new())
 }
 
-#[cfg(not(feature = "prometheus"))]
-async fn fetch_backup_progress(_cluster: &Cluster) -> HashMap<String, u16> {
-    return HashMap::new();
+#[cfg(feature = "prometheus")]
+/// Async wrapper that fetches backup progress before analyzing
+async fn analyze_with_enrichment(
+    cluster: Cluster,
+    http_client: Option<&ClientWithMiddleware>,
+) -> ClusterHealth {
+    let backup_progress = fetch_backup_progress(&cluster, http_client).await;
+    tracing::debug!(backup_progress = ?backup_progress, cluster = cluster.name, "fetched backup progress for cluster");
+    analyze(cluster, backup_progress)
 }
 
 #[cfg(feature = "prometheus")]
 /// Fetch backup progress for any pg_basebackup connections on the primary
-async fn fetch_backup_progress(cluster: &Cluster) -> HashMap<String, u16> {
-    use crate::v2::prometheus::client;
+async fn fetch_backup_progress(
+    cluster: &Cluster,
+    http_client: Option<&ClientWithMiddleware>,
+) -> HashMap<String, u16> {
     use crate::v2::scan::Role;
 
     let mut progress = HashMap::new();
 
+    // No client available, skip prometheus queries
+    let http_client = match http_client {
+        Some(c) => c,
+        None => {
+            tracing::debug!("no prometheus client available");
+            return progress;
+        }
+    };
+
     // Find the primary node
     let primary = match cluster.primary() {
         Some(p) => p,
-        None => return progress,
+        None => {
+            tracing::debug!("no primary node found in cluster");
+            return progress;
+        }
     };
 
     // Get primary DB size and replication connections
     let (total_db_size, replication_conns) = match &primary.role {
         Role::Primary { health } => (health.total_db_size_bytes, &health.replication),
-        _ => return progress,
+        _ => {
+            tracing::debug!("primary node has no health data");
+            return progress;
+        }
     };
+
+    tracing::debug!(
+        replication_count = replication_conns.len(),
+        total_db_size = total_db_size,
+        "checking replication connections for pg_basebackup"
+    );
+
+    // Build a map of IP address to hostname from cluster nodes for fallback lookup
+    let ip_to_hostname: HashMap<String, String> = cluster
+        .nodes
+        .iter()
+        .map(|n| (n.ip_address.to_string(), n.node_name.clone()))
+        .collect();
+
+    tracing::debug!(
+        ip_mapping_count = ip_to_hostname.len(),
+        "built ip-to-hostname lookup map"
+    );
 
     // For each pg_basebackup connection, fetch replica filesystem usage
     for conn in replication_conns {
-        if conn.application_name == "pg_basebackup"
-            && let Some(client_addr) = &conn.client_addr
-        {
-            match client::get_filesystem_used_bytes(client_addr, "/var/lib/pgsql", None).await {
+        if conn.application_name == "pg_basebackup" {
+            tracing::debug!(
+                pid = conn.pid,
+                state = %conn.state,
+                client_addr = ?conn.client_addr,
+                client_hostname = ?conn.client_hostname,
+                "found pg_basebackup connection"
+            );
+
+            // Try client_hostname first, fall back to looking up by IP
+            let hostname = conn
+                .client_hostname
+                .as_ref()
+                .or_else(|| {
+                    conn.client_addr
+                        .as_ref()
+                        .and_then(|ip| ip_to_hostname.get(ip))
+                })
+                .cloned();
+
+            if hostname.is_none() {
+                tracing::debug!(
+                    client_addr = ?conn.client_addr,
+                    "pg_basebackup connection has no resolvable hostname"
+                );
+            }
+            let hostname = hostname.unwrap();
+
+            tracing::debug!(
+                hostname = %hostname,
+                source = if conn.client_hostname.is_some() { "client_hostname" } else { "ip_lookup" },
+                "resolved hostname for pg_basebackup connection"
+            );
+
+            match client::get_filesystem_used_bytes(&hostname, "/var/lib/pgsql", Some(http_client))
+                .await
+            {
                 Ok(used_bytes) => {
                     let progress_pct = estimate_backup_progress(used_bytes, total_db_size as u64);
-                    progress.insert(client_addr.clone(), progress_pct);
+                    tracing::debug!(
+                        hostname = %hostname,
+                        used_bytes = used_bytes,
+                        progress_pct = progress_pct,
+                        "calculated backup progress"
+                    );
+                    progress.insert(hostname, progress_pct);
                 }
                 Err(e) => {
                     tracing::warn!(
-                        client_addr = %client_addr,
+                        hostname = %hostname,
                         error = %e,
                         "failed to fetch backup progress from prometheus"
                     );
@@ -719,7 +816,7 @@ fn pg_lsn_diff(lsn1: &str, lsn2: &str) -> Option<u64> {
 /// This is a rough estimate assuming the used bytes on the replica are mostly from the backup.
 /// This may be inaccurate if there's other data on the filesystem.
 fn estimate_backup_progress(replica_used_bytes: u64, primary_db_size: u64) -> u16 {
-    if primary_db_size <= 0 {
+    if primary_db_size == 0 {
         return 0;
     }
 

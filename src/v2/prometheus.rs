@@ -1,15 +1,18 @@
-/// Prometheus integration for backup progress tracking
-///
-/// This module is only available when the `prometheus` feature is enabled.
-/// It provides functionality to query Prometheus for disk metrics to estimate
-/// pg_basebackup progress.
+//! Prometheus integration for backup progress tracking
+//!
+//! This module is only available when the `prometheus` feature is enabled.
+//! It provides functionality to query Prometheus for disk metrics to estimate
+//! pg_basebackup progress.
 
 #[cfg(feature = "prometheus")]
 pub mod client {
     use reqwest::Url;
-    use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+
+    // Re-export ClientWithMiddleware for use in other modules
+    use reqwest_middleware::ClientBuilder;
+    pub use reqwest_middleware::ClientWithMiddleware;
 
     /// Prometheus URL - configure at compile time or use default (don't use default)
     const PROMETHEUS_URL: &str = match option_env!("PROMETHEUS_URL") {
@@ -36,11 +39,26 @@ pub mod client {
         value: (f64, String), // [timestamp, value]
     }
 
+    /// Create a default HTTP client for Prometheus queries
+    ///
+    /// Returns a client with a 5 second timeout. Use this to create a shared
+    /// client when making multiple Prometheus queries.
+    pub fn create_client() -> Result<ClientWithMiddleware, Box<dyn std::error::Error + Send + Sync>>
+    {
+        Ok(ClientBuilder::new(
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()?,
+        )
+        .build())
+    }
+
     /// Get used bytes on a filesystem mountpoint
     /// Calculates: size_bytes - avail_bytes = used_bytes
     ///
     /// If client is None, creates a default client with 5s timeout.
     /// Pass a custom client for testing or custom configuration.
+    #[tracing::instrument(skip(client), level = "debug")]
     pub async fn get_filesystem_used_bytes(
         hostname: &str,
         mountpoint: &str,
@@ -51,12 +69,7 @@ pub mod client {
         let client = match client {
             Some(c) => c,
             None => {
-                default_client = ClientBuilder::new(
-                    reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(5))
-                        .build()?,
-                )
-                .build();
+                default_client = create_client()?;
                 &default_client
             }
         };
@@ -79,6 +92,12 @@ pub mod client {
         let size_url = Url::parse_with_params(&base_url, &[("query", &size_query)])?;
         let size_response: PrometheusResponse = client.get(size_url).send().await?.json().await?;
 
+        tracing::debug!(
+            status = %size_response.status,
+            result_count = size_response.data.result.len(),
+            "received size response from prometheus"
+        );
+
         let size_bytes = size_response
             .data
             .result
@@ -86,9 +105,17 @@ pub mod client {
             .and_then(|r| r.value.1.parse::<u64>().ok())
             .ok_or("No size data from Prometheus")?;
 
+        tracing::debug!(size_bytes = size_bytes, "parsed size_bytes");
+
         // Query for available
         let avail_url = Url::parse_with_params(&base_url, &[("query", &avail_query)])?;
         let avail_response: PrometheusResponse = client.get(avail_url).send().await?.json().await?;
+
+        tracing::debug!(
+            status = %avail_response.status,
+            result_count = avail_response.data.result.len(),
+            "received avail response from prometheus"
+        );
 
         let avail_bytes = avail_response
             .data
@@ -97,8 +124,13 @@ pub mod client {
             .and_then(|r| r.value.1.parse::<u64>().ok())
             .ok_or("No avail data from Prometheus")?;
 
+        tracing::debug!(avail_bytes = avail_bytes, "parsed avail_bytes");
+
         // Used = Size - Available
-        Ok(size_bytes.saturating_sub(avail_bytes))
+        let used_bytes = size_bytes.saturating_sub(avail_bytes);
+        tracing::debug!(used_bytes = used_bytes, "calculated used_bytes");
+
+        Ok(used_bytes)
     }
 
     #[cfg(test)]
