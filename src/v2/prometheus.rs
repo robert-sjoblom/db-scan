@@ -103,8 +103,6 @@ pub mod client {
 
     #[cfg(test)]
     mod tests {
-        use crate::v2::prometheus::estimate_backup_progress;
-
         use super::*;
         use rvcr::{VCRMiddleware, VCRMode};
         use std::path::PathBuf;
@@ -133,33 +131,6 @@ pub mod client {
 
             // Expected: size (858553069568) - avail (442926485504) = 415626584064 bytes
             assert_eq!(used_bytes, 415626584064);
-        }
-
-        #[test]
-        fn test_estimate_backup_progress() {
-            let replica_used_bytes = 415_626_584_064u64; // ~415 GB
-            let primary_db_size = 1_000_000_000_000u64; // 1 TB
-
-            let progress_pct = estimate_backup_progress(replica_used_bytes, primary_db_size);
-
-            // Expected progress: (415626584064 / 1000000000000) * 100 = ~41.56%
-            let expected_progress = (415_626_584_064f64 / 1_000_000_000_000f64) * 100.0;
-            assert!((progress_pct - expected_progress).abs() < 0.01);
-        }
-
-        #[test]
-        fn test_estimate_backup_progress_edge_cases() {
-            // Zero primary size
-            assert_eq!(estimate_backup_progress(100, 0), 0.0);
-
-            // Zero replica usage
-            assert_eq!(estimate_backup_progress(0, 1000), 0.0);
-
-            // 100% complete
-            assert_eq!(estimate_backup_progress(1000, 1000), 100.0);
-
-            // Over 100% (more data on replica than primary DB)
-            assert_eq!(estimate_backup_progress(1500, 1000), 150.0);
         }
 
         fn initialize_test_client(path: &str, mode: VCRMode) -> ClientWithMiddleware {

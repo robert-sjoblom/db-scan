@@ -23,6 +23,7 @@
                             "max_wal_senders": "184",
                             "synchronous_commit": "remote_apply"
                         },
+                        "total_db_size_bytes": 1073741824,
                         "replication": [
                             {
                                 "pid": 2393390,
