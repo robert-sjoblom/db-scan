@@ -1,0 +1,9 @@
+{
+    "rust-analyzer.cargo.features": [
+        "prometheus"
+    ],
+    "rust-analyzer.runnables.extraArgs": [
+        "--features",
+        "prometheus"
+    ]
+}
