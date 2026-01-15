@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::{BufWriter, IsTerminal, Write},
     path::Path,
@@ -6,8 +7,9 @@ use std::{
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::v2::analyze::{
-    AnalyzedCluster, ClusterHealth, Reason, SplitBrainInfo, SplitBrainResolution,
+use crate::v2::{
+    analyze::{AnalyzedCluster, ClusterHealth, Reason, SplitBrainInfo, SplitBrainResolution},
+    scan::health_check_primary::ReplicationConnection,
 };
 
 /// ANSI color codes for terminal output
@@ -261,65 +263,73 @@ fn get_connected_replicas(primary: Option<&crate::v2::scan::AnalyzedNode>) -> St
 /// Format a list of replication connections as a comma-separated string of db numbers.
 /// Deduplicates connections with the same application_name and client_addr.
 /// Shows lag for backup operations (pg_basebackup, etc.)
+/// Output is sorted by (application_name, client_addr) for deterministic results.
 fn format_replica_list(
     replication: &[crate::v2::scan::health_check_primary::ReplicationConnection],
 ) -> String {
-    use std::collections::HashMap;
-
-    // Group by (application_name, client_addr) and collect connections
-    let mut grouped: HashMap<
-        (String, Option<String>),
-        Vec<&crate::v2::scan::health_check_primary::ReplicationConnection>,
-    > = HashMap::new();
-    let mut order: Vec<(String, Option<String>)> = Vec::new();
-
-    for conn in replication {
-        let key = (conn.application_name.clone(), conn.client_addr.clone());
-        if !grouped.contains_key(&key) {
-            order.push(key.clone());
-        }
-        grouped.entry(key).or_default().push(conn);
+    if replication.is_empty() {
+        return "-".to_string();
     }
 
-    let connected: Vec<String> = order
-        .iter()
-        .map(|(app_name, client_addr)| {
-            let normalized = normalize_application_name(app_name);
-            let conns = &grouped[&(app_name.clone(), client_addr.clone())];
-            let count = conns.len();
+    let grouped = group_connections_by_identity(replication);
 
-            // For backup operations, show lag based on time (more accurate for backup progress)
-            let is_backup = matches!(
-                app_name.as_str(),
-                "pg_basebackup" | "pg_dump" | "pg_dumpall"
-            );
-            let lag_info = if is_backup {
-                // For pg_basebackup, use time-based replay_lag to estimate data volume
-                // LSN differences don't represent actual backup progress accurately
-                let max_lag = conns
-                    .iter()
-                    .filter_map(|c| c.replay_lag.as_deref())
-                    .filter_map(parse_lag_to_bytes)
-                    .max();
-
-                max_lag.map(|lag| format!(" ~{} behind", format_bytes(lag)))
-            } else {
-                None
-            };
-
-            if count > 1 {
-                format!("{}(×{}{})", normalized, count, lag_info.unwrap_or_default())
-            } else {
-                format!("{}{}", normalized, lag_info.unwrap_or_default())
-            }
-        })
+    let formatted: Vec<String> = grouped
+        .into_iter()
+        .map(|((app_name, _), conns)| format_replica_entry(&app_name, &conns))
         .collect();
 
-    if connected.is_empty() {
+    if formatted.is_empty() {
         "-".to_string()
     } else {
-        connected.join(",")
+        formatted.join(",")
     }
+}
+
+type ConnectionKey = (String, Option<String>);
+
+/// Group connections by (application_name, client_addr), sorted for deterministic output.
+fn group_connections_by_identity(
+    replication: &[ReplicationConnection],
+) -> std::collections::BTreeMap<ConnectionKey, Vec<&ReplicationConnection>> {
+    let mut grouped: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for conn in replication {
+        let key = (conn.application_name.clone(), conn.client_addr.clone());
+        grouped.entry(key).or_default().push(conn);
+    }
+    grouped
+}
+
+/// Format a single replica entry with optional count and backup lag info.
+fn format_replica_entry(app_name: &str, conns: &[&ReplicationConnection]) -> String {
+    let normalized = normalize_application_name(app_name);
+    let count = conns.len();
+    let lag_info = compute_backup_lag_display(app_name, conns);
+
+    match (count > 1, lag_info) {
+        (true, Some(lag)) => format!("{}(×{}{})", normalized, count, lag),
+        (true, None) => format!("{}(×{})", normalized, count),
+        (false, Some(lag)) => format!("{}{}", normalized, lag),
+        (false, None) => normalized,
+    }
+}
+
+/// For backup operations, compute a human-readable lag estimate.
+/// Returns None for non-backup operations or if no lag data is available.
+fn compute_backup_lag_display(app_name: &str, conns: &[&ReplicationConnection]) -> Option<String> {
+    const BACKUP_APPS: &[&str] = &["pg_basebackup", "pg_dump", "pg_dumpall"];
+
+    if !BACKUP_APPS.contains(&app_name) {
+        return None;
+    }
+
+    // Use time-based replay_lag to estimate data volume
+    // (LSN differences don't represent actual backup progress accurately)
+    conns
+        .iter()
+        .filter_map(|c| c.replay_lag.as_deref())
+        .filter_map(parse_lag_to_bytes)
+        .max()
+        .map(|lag| format!(" ~{} behind", format_bytes(lag)))
 }
 
 /// Parse PostgreSQL interval lag to estimated bytes
