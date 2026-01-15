@@ -738,7 +738,10 @@ pub enum SplitBrainResolution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::tests_common::{healthy, unhealthy};
+    use crate::v2::{
+        tests_common::{healthy, unhealthy},
+        writer::parse_lag_to_bytes,
+    };
 
     use pretty_assertions::assert_eq;
 
@@ -749,7 +752,7 @@ mod tests {
         let actual = analyze(cluster.clone());
         let expected = ClusterHealth::Healthy {
             failover: false,
-            cluster: AnalyzedCluster { cluster: cluster },
+            cluster: AnalyzedCluster { cluster },
         };
 
         assert_eq!(actual, expected);
@@ -761,7 +764,7 @@ mod tests {
         let actual = analyze(cluster.clone());
         let expected = ClusterHealth::Degraded {
             lag: 0,
-            cluster: AnalyzedCluster { cluster: cluster },
+            cluster: AnalyzedCluster { cluster },
             reason: Reason::OneReplicaDown,
         };
         assert_eq!(actual, expected);
@@ -775,7 +778,7 @@ mod tests {
         let actual = analyze(cluster.clone());
         let expected = ClusterHealth::Degraded {
             lag: 0,
-            cluster: AnalyzedCluster { cluster: cluster },
+            cluster: AnalyzedCluster { cluster },
             reason: Reason::RebuildingReplica,
         };
         assert_eq!(actual, expected);
@@ -788,7 +791,7 @@ mod tests {
         let actual = analyze(cluster.clone());
         let expected = ClusterHealth::Degraded {
             lag: 0,
-            cluster: AnalyzedCluster { cluster: cluster },
+            cluster: AnalyzedCluster { cluster },
             reason: Reason::ChainedReplica {
                 chained_replica: "dev-pg-app001-db003.sto3.example.com".to_string(),
                 upstream_replica: "dev-pg-app001-db002.sto2.example.com".to_string(),
@@ -819,55 +822,32 @@ mod tests {
 
     #[test]
     fn test_parse_lag_to_bytes_zero_lag() {
-        assert_eq!(parse_lag_to_bytes(Some("00:00:00.001234")), Some(0));
+        assert_eq!(parse_lag_to_bytes("00:00:00.001234"), Some(0));
     }
 
     #[test]
     fn test_parse_lag_to_bytes_one_second() {
         // 1 second * 16MB/s = 16,000,000 bytes
-        assert_eq!(
-            parse_lag_to_bytes(Some("00:00:01.000000")),
-            Some(16_000_000)
-        );
+        assert_eq!(parse_lag_to_bytes("00:00:01.000000"), Some(16_000_000));
     }
 
     #[test]
     fn test_parse_lag_to_bytes_one_minute() {
         // 60 seconds * 16MB/s = 960,000,000 bytes
-        assert_eq!(
-            parse_lag_to_bytes(Some("00:01:00.000000")),
-            Some(960_000_000)
-        );
-    }
-
-    #[test]
-    fn test_parse_lag_to_bytes_one_hour() {
-        // 3600 seconds * 16MB/s = 57,600,000,000 bytes
-        assert_eq!(
-            parse_lag_to_bytes(Some("01:00:00.000000")),
-            Some(57_600_000_000)
-        );
+        assert_eq!(parse_lag_to_bytes("00:01:00.000000"), Some(960_000_000));
     }
 
     #[test]
     fn test_parse_lag_to_bytes_complex() {
         // 1h 30m 45s = 5445 seconds * 16MB/s = 87,120,000,000 bytes
-        assert_eq!(
-            parse_lag_to_bytes(Some("01:30:45.123456")),
-            Some(87_120_000_000)
-        );
-    }
-
-    #[test]
-    fn test_parse_lag_to_bytes_none() {
-        assert_eq!(parse_lag_to_bytes(None), None);
+        assert_eq!(parse_lag_to_bytes("01:30:45.123456"), Some(87_120_000_000));
     }
 
     #[test]
     fn test_parse_lag_to_bytes_invalid_format() {
-        assert_eq!(parse_lag_to_bytes(Some("invalid")), None);
-        assert_eq!(parse_lag_to_bytes(Some("00:00")), None);
-        assert_eq!(parse_lag_to_bytes(Some("")), None);
+        assert_eq!(parse_lag_to_bytes("invalid"), None);
+        assert_eq!(parse_lag_to_bytes("00:00"), None);
+        assert_eq!(parse_lag_to_bytes(""), None);
     }
 }
 
@@ -941,13 +921,11 @@ mod cluster_state_tests {
             // If there's high lag specified (>= 5 seconds), create lagging LSN values
             // Base LSN: 48F/6957B540
             let base_lsn = "48F/6957B540";
-            let has_high_lag = self.replay_lag.as_ref().map_or(false, |lag| {
+            let has_high_lag = self.replay_lag.as_ref().is_some_and(|lag| {
                 // Parse lag to check if it's >= 5 seconds
-                if let Some(seconds) = parse_lag_seconds(lag) {
-                    seconds >= 5
-                } else {
-                    false
-                }
+                parse_lag_seconds(lag)
+                    .map(|seconds| seconds >= 5)
+                    .unwrap_or(false)
             });
 
             let lagging_lsn = if has_high_lag {

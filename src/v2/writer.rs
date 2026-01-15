@@ -324,7 +324,7 @@ fn format_replica_list(
 
 /// Parse PostgreSQL interval lag to estimated bytes
 /// Used for backup operations where time-based lag is more accurate than LSN diff
-fn parse_lag_to_bytes(lag: &str) -> Option<u64> {
+pub fn parse_lag_to_bytes(lag: &str) -> Option<u64> {
     // Format: HH:MM:SS.microseconds
     let parts: Vec<&str> = lag.split(':').collect();
     if parts.len() != 3 {
