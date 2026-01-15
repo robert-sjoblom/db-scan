@@ -37,8 +37,11 @@ jobs:
                   path: target
                   key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
-            - name: Run tests
+            - name: Run tests (without features)
               run: cargo test --verbose
+
+            - name: Run tests (with prometheus feature)
+              run: cargo test --verbose --features prometheus
 
     fmt:
         name: Format

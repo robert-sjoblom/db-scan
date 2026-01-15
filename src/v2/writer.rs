@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn test_output_row_ordering() {
-        let mut rows = vec![
+        let mut rows = [
             OutputRow {
                 status: Status::Critical,
                 cluster: "cluster_a".to_string(),
