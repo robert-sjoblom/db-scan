@@ -65,5 +65,8 @@ jobs:
               with:
                   components: clippy
 
-            - name: Run clippy
-              run: cargo clippy --all-targets --all-features -- -D warnings
+            - name: Run clippy (without features)
+              run: cargo clippy --all-targets -- -D warnings
+
+            - name: Run clippy (with prometheus feature)
+              run: cargo clippy --all-targets --features prometheus -- -D warnings
