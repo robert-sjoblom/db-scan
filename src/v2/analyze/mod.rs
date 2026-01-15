@@ -966,6 +966,7 @@ mod cluster_state_tests {
                 current_wal_lsn: base_lsn.to_string(),
                 configuration: self.configuration,
                 replication,
+                total_db_size_bytes: 1073741824,
             }
         }
     }

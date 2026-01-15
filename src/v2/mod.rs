@@ -123,6 +123,7 @@ mod tests_common {
                 current_wal_lsn: self.current_wal_lsn.clone(),
                 configuration: self.configuration.clone(),
                 replication: self.replication.clone(),
+                total_db_size_bytes: self.total_db_size_bytes,
             }
         }
     }
