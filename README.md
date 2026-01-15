@@ -12,6 +12,7 @@ Large parts of this readme (but not the code) was AI-summarized. Tread carefully
 - **Split-Brain Detection**: Detects and resolves split-brain scenarios using timeline and replica evidence
 - **Replication Monitoring**: Tracks replication lag, replica status, and synchronization state
 - **Failover Detection**: Identifies clusters that have experienced failover
+- **Backup Progress Tracking** (optional): Estimates pg_basebackup progress via Prometheus filesystem metrics
 - **Concurrent Scanning**: Parallel health checks across multiple clusters and nodes
 - **Multiple Output Formats**: Terminal output (with colors) and CSV export
 - **Structured Logging**: Full tracing support with spans and structured fields
@@ -78,10 +79,49 @@ Nodes must follow the naming pattern: `{env}-pg-{app}-{db}.{zone}.{domain}`
 ### Build from Source
 
 ```bash
+# Basic build
 cargo build --release
+
+# Build with Prometheus integration for backup progress tracking
+PROMETHEUS_URL=https://prometheus.example.com DATABASE_PORTAL_URL=https://database.example.com cargo build --release --features prometheus
 ```
 
 The binary will be available at `target/release/db-scan`
+
+### Optional Features
+# PostgreSQL credentials
+export PGUSER="your-username"
+export PGPASSWORD="your-password"
+export PGSSLKEY="/path/to/ssl.key"
+export PGSSLCERT="/path/to/ssl.crt"
+export PGSSLROOTCERT="/path/to/ca.crt"
+
+# Logging
+export RUST_LOG="info"  # or debug, trace, warn, error
+
+# Optional: Prometheus URL (compile-time only, see Build from Source)
+# PROMETHEUS_URL=https://prometheus.example.com
+```bash
+cargo build --release --features prometheus
+```
+
+**Configure Prometheus URL** (compile-time):
+```bash
+PROMETHEUS_URL=https://prometheus.example.com cargo build --release --features prometheus
+```
+
+**Requirements:**
+- Prometheus server with `node_exporter` metrics
+- Metrics: `node_filesystem_size_bytes` and `node_filesystem_avail_bytes`
+- Labels: `host` (hostname) and `mountpoint` (e.g., `/var/lib/pgsql`)
+
+**How it works:**
+1. During primary health check, captures total database size
+2. For replicas using pg_basebackup, queries Prometheus for filesystem usage
+3. Estimates progress: `(used_bytes / primary_db_size) * 100`
+4. Progress stored in analysis results (0-10000, where 4156 = 41.56%)
+
+**Note:** This is a rough estimate assuming filesystem usage is mostly from the backup. May be inaccurate if significant other data exists on the filesystem.
 
 ## Configuration
 
