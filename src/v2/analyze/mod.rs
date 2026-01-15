@@ -187,7 +187,10 @@ async fn fetch_backup_progress(
                         progress_pct = progress_pct,
                         "calculated backup progress"
                     );
-                    progress.insert(hostname, progress_pct);
+                    // Key by client_addr (IP) for consistent lookup in writer
+                    if let Some(ref client_addr) = conn.client_addr {
+                        progress.insert(client_addr.clone(), progress_pct);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -2061,6 +2064,7 @@ mod cluster_state_tests {
     }
 
     #[test]
+    #[cfg(feature = "prometheus")]
     fn test_estimate_backup_progress() {
         let replica_used_bytes = 415_626_584_064u64; // ~415 GB
         let primary_db_size = 1_000_000_000_000u64; // 1 TB
@@ -2072,6 +2076,7 @@ mod cluster_state_tests {
     }
 
     #[test]
+    #[cfg(feature = "prometheus")]
     fn test_estimate_backup_progress_edge_cases() {
         // Zero primary size
         assert_eq!(estimate_backup_progress(100, 0), 0);

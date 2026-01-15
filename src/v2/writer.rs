@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs::File,
     io::{BufWriter, IsTerminal, Write},
     path::Path,
@@ -258,7 +258,7 @@ fn extract_primary_and_replicas(cluster: &AnalyzedCluster) -> (String, String) {
         .map(|n| extract_db_number(&n.node_name))
         .unwrap_or_else(|| "(none)".to_string());
 
-    let replicas = get_connected_replicas(primary_node);
+    let replicas = get_connected_replicas(primary_node, &cluster.backup_progress);
 
     (primary_short, replicas)
 }
@@ -267,10 +267,13 @@ fn extract_primary_and_replicas(cluster: &AnalyzedCluster) -> (String, String) {
 ///
 /// Returns a comma-separated list of replica db numbers (e.g., "db002,db003")
 /// or "-" if no primary or no connected replicas.
-fn get_connected_replicas(primary: Option<&crate::v2::scan::AnalyzedNode>) -> String {
+fn get_connected_replicas(
+    primary: Option<&crate::v2::scan::AnalyzedNode>,
+    backup_progress: &HashMap<String, u16>,
+) -> String {
     primary
         .and_then(|p| p.role.as_primary())
-        .map(|health| format_replica_list(&health.replication))
+        .map(|health| format_replica_list(&health.replication, backup_progress))
         .unwrap_or_else(|| "-".to_string())
 }
 
@@ -280,6 +283,7 @@ fn get_connected_replicas(primary: Option<&crate::v2::scan::AnalyzedNode>) -> St
 /// Output is sorted by (application_name, client_addr) for deterministic results.
 fn format_replica_list(
     replication: &[crate::v2::scan::health_check_primary::ReplicationConnection],
+    backup_progress: &HashMap<String, u16>,
 ) -> String {
     if replication.is_empty() {
         return "-".to_string();
@@ -289,7 +293,7 @@ fn format_replica_list(
 
     let formatted: Vec<String> = grouped
         .into_iter()
-        .map(|((app_name, _), conns)| format_replica_entry(&app_name, &conns))
+        .map(|((app_name, _), conns)| format_replica_entry(&app_name, &conns, backup_progress))
         .collect();
 
     if formatted.is_empty() {
@@ -314,10 +318,14 @@ fn group_connections_by_identity(
 }
 
 /// Format a single replica entry with optional count and backup lag info.
-fn format_replica_entry(app_name: &str, conns: &[&ReplicationConnection]) -> String {
+fn format_replica_entry(
+    app_name: &str,
+    conns: &[&ReplicationConnection],
+    backup_progress: &HashMap<String, u16>,
+) -> String {
     let normalized = normalize_application_name(app_name);
     let count = conns.len();
-    let lag_info = compute_backup_lag_display(app_name, conns);
+    let lag_info = compute_backup_lag_display(app_name, conns, backup_progress);
 
     match (count > 1, lag_info) {
         (true, Some(lag)) => format!("{}(×{}{})", normalized, count, lag),
@@ -329,13 +337,36 @@ fn format_replica_entry(app_name: &str, conns: &[&ReplicationConnection]) -> Str
 
 /// For backup operations, compute a human-readable lag estimate.
 /// Returns None for non-backup operations or if no lag data is available.
-fn compute_backup_lag_display(app_name: &str, conns: &[&ReplicationConnection]) -> Option<String> {
+/// When prometheus feature is enabled and backup progress is available, shows actual progress.
+fn compute_backup_lag_display(
+    app_name: &str,
+    conns: &[&ReplicationConnection],
+    backup_progress: &HashMap<String, u16>,
+) -> Option<String> {
     const BACKUP_APPS: &[&str] = &["pg_basebackup", "pg_dump", "pg_dumpall"];
 
     if !BACKUP_APPS.contains(&app_name) {
         return None;
     }
 
+    // Try to use actual backup progress from Prometheus (when available)
+    // Progress is stored as percentage * 100 (e.g., 4156 = 41.56%)
+    // The HashMap is keyed by client_addr (IP address) for consistent lookup
+    let progress_from_prometheus = conns
+        .iter()
+        .filter_map(|c| {
+            c.client_addr
+                .as_ref()
+                .and_then(|addr| backup_progress.get(addr))
+        })
+        .max();
+
+    if let Some(&progress_pct_100) = progress_from_prometheus {
+        let pct = progress_pct_100 as f64 / 100.0;
+        return Some(format!(" ~{:.1}%", pct));
+    }
+
+    // Fallback: use time-based estimate from replay_lag
     // Note: replay_lag shows time since backup started, NOT actual backup progress.
     // pg_stat_replication doesn't track file copy progress, only WAL streaming lag.
     // This is a rough estimate based on time elapsed since backup connection began.
