@@ -35,7 +35,7 @@ pub struct WriterOptions {
 }
 
 /// A row of output data extracted from ClusterHealth
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 struct OutputRow {
     status: Status,
     cluster: String,
@@ -46,12 +46,26 @@ struct OutputRow {
     details_json: String,
 }
 
+impl Ord for OutputRow {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.status
+            .cmp(&other.status)
+            .then_with(|| self.cluster.cmp(&other.cluster))
+    }
+}
+
+impl PartialOrd for OutputRow {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Status {
-    Critical = 0,
-    Degraded = 1,
-    Unknown = 2,
-    Healthy = 3,
+    Healthy = 0,
+    Unknown = 1,
+    Degraded = 2,
+    Critical = 3,
 }
 
 impl Status {
@@ -154,8 +168,8 @@ pub async fn write_results(
         }
     }
 
-    // Sort by severity (Critical first, then Degraded, Unknown, Healthy)
-    rows.sort_by(|a, b| a.status.cmp(&b.status));
+    // Sort by severity (Healthy first, then Unknown, Degraded, Critical), then cluster alphabetically
+    rows.sort();
 
     build_terminal_output(&rows, &options)
 }
@@ -636,4 +650,89 @@ fn build_terminal_output(rows: &[OutputRow], options: &WriterOptions) -> String 
 /// Determine if a healthy cluster should be shown based on options
 fn should_show_healthy_cluster(options: &WriterOptions, failover: bool) -> bool {
     options.show_healthy || (failover && options.show_failover)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_output_row_ordering() {
+        let mut rows = vec![
+            OutputRow {
+                status: Status::Critical,
+                cluster: "cluster_a".to_string(),
+                primary: "db001".to_string(),
+                replicas: "db002".to_string(),
+                lag: None,
+                reason: "NoPrimary".to_string(),
+                details_json: "{}".to_string(),
+            },
+            OutputRow {
+                status: Status::Healthy,
+                cluster: "cluster_z".to_string(),
+                primary: "db001".to_string(),
+                replicas: "db002".to_string(),
+                lag: None,
+                reason: "-".to_string(),
+                details_json: "{}".to_string(),
+            },
+            OutputRow {
+                status: Status::Degraded,
+                cluster: "cluster_b".to_string(),
+                primary: "db001".to_string(),
+                replicas: "db002".to_string(),
+                lag: Some(1000),
+                reason: "HighReplicationLag".to_string(),
+                details_json: "{}".to_string(),
+            },
+            OutputRow {
+                status: Status::Healthy,
+                cluster: "cluster_a".to_string(),
+                primary: "db001".to_string(),
+                replicas: "db002".to_string(),
+                lag: None,
+                reason: "-".to_string(),
+                details_json: "{}".to_string(),
+            },
+            OutputRow {
+                status: Status::Unknown,
+                cluster: "cluster_c".to_string(),
+                primary: "-".to_string(),
+                replicas: "?/2 (1 reachable)".to_string(),
+                lag: None,
+                reason: "NoNodesReachable".to_string(),
+                details_json: "{}".to_string(),
+            },
+            OutputRow {
+                status: Status::Critical,
+                cluster: "cluster_b".to_string(),
+                primary: "db001".to_string(),
+                replicas: "-".to_string(),
+                lag: None,
+                reason: "WritesBlocked".to_string(),
+                details_json: "{}".to_string(),
+            },
+        ];
+
+        rows.sort();
+
+        assert_eq!(rows[0].status, Status::Healthy);
+        assert_eq!(rows[0].cluster, "cluster_a");
+
+        assert_eq!(rows[1].status, Status::Healthy);
+        assert_eq!(rows[1].cluster, "cluster_z");
+
+        assert_eq!(rows[2].status, Status::Unknown);
+        assert_eq!(rows[2].cluster, "cluster_c");
+
+        assert_eq!(rows[3].status, Status::Degraded);
+        assert_eq!(rows[3].cluster, "cluster_b");
+
+        assert_eq!(rows[4].status, Status::Critical);
+        assert_eq!(rows[4].cluster, "cluster_a");
+
+        assert_eq!(rows[5].status, Status::Critical);
+        assert_eq!(rows[5].cluster, "cluster_b");
+    }
 }
