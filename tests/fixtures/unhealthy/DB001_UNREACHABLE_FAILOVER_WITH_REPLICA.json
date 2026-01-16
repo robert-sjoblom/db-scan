@@ -23,7 +23,6 @@
                             "synchronous_standby_names": "ANY 1 ( dev_pg_app011_db001, dev_pg_app011_db003 )",
                             "wal_level": "logical"
                         },
-                        "total_db_size_bytes": 1073741824,
                         "replication": [
                             {
                                 "pid": 2005912,

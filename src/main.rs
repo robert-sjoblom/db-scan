@@ -8,6 +8,7 @@ use crate::v2::{analyze::ClusterHealth, cluster::Cluster, scan::AnalyzedNode};
 
 mod database_portal;
 mod logging;
+mod prometheus;
 mod v2;
 
 static ARGS: OnceLock<Args> = OnceLock::new();
@@ -73,6 +74,15 @@ struct Args {
     no_color: bool,
 }
 
+impl Args {
+    fn cluster(&self) -> String {
+        self.cluster
+            .as_ref()
+            .map(|s| format!("{s}.*"))
+            .unwrap_or_else(|| ".*-(pg|ts)-.*".to_string())
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let now = Instant::now();
@@ -96,6 +106,27 @@ async fn main() {
 
     ARGS.set(args).unwrap();
 
+    let batch_filesystem_data = {
+        let start = std::time::Instant::now();
+        let data =
+            prometheus::client::get_batch_filesystem_data(ARGS.get().unwrap().cluster()).await;
+        let elapsed = start.elapsed();
+
+        if data.is_empty() {
+            tracing::warn!(
+                elapsed_ms = elapsed.as_millis(),
+                "no prometheus metrics fetched, backup progress will be unavailable"
+            );
+        } else {
+            tracing::info!(
+                metric_count = data.len(),
+                elapsed_ms = elapsed.as_millis(),
+                "fetched prometheus filesystem metrics"
+            );
+        }
+        data
+    };
+
     let (node_tx, node_rx) = tokio::sync::mpsc::unbounded_channel::<AnalyzedNode>();
     let (cluster_tx, cluster_rx) = tokio::sync::mpsc::unbounded_channel::<Cluster>();
     let (analyze_tx, analyze_rx) = tokio::sync::mpsc::unbounded_channel::<ClusterHealth>();
@@ -116,7 +147,11 @@ async fn main() {
         .inspect(|n| tracing::trace!(node_id = n.id, node_name = %n.node_name, cluster_id = n.cluster_id, "fetched node"));
 
     let scan_handle = tokio::spawn(v2::scan::scan_nodes(node_tx, nodes));
-    let analyze_handle = tokio::spawn(v2::analyze::analyze_clusters(cluster_rx, analyze_tx));
+    let analyze_handle = tokio::spawn(v2::analyze::analyze_clusters(
+        batch_filesystem_data,
+        cluster_rx,
+        analyze_tx,
+    ));
     let writer_handle = tokio::spawn(v2::writer::write_results(analyze_rx, writer_options));
 
     let (_, _, writer_result) =

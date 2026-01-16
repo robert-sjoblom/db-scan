@@ -3,10 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::v2::scan::AnalyzedNode;
-
-#[cfg(feature = "prometheus")]
-use crate::v2::scan::health_check_primary::ReplicationConnection;
+use crate::v2::scan::{AnalyzedNode, health_check_primary::ReplicationConnection};
 
 /// Listens for incoming Nodes, groups them by cluster_id, and sends complete Clusters
 /// to the provided cluster channel. A Cluster is considered complete when it has 3 Nodes.
@@ -87,14 +84,13 @@ impl Cluster {
     }
 }
 
-#[cfg(feature = "prometheus")]
 impl Cluster {
     /// Returns replication connections from the primary (if there's only one primary)
-    pub fn primary_replication_info(&self) -> Option<(i64, &Vec<ReplicationConnection>)> {
+    pub fn primary_replication_info(&self) -> Option<&Vec<ReplicationConnection>> {
         use super::scan::Role;
 
         self.primary().and_then(|p| match &p.role {
-            Role::Primary { health } => Some((health.total_db_size_bytes, &health.replication)),
+            Role::Primary { health } => Some(&health.replication),
             _ => None,
         })
     }
