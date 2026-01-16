@@ -116,12 +116,12 @@ PROMETHEUS_URL=https://prometheus.example.com cargo build --release --features p
 - Labels: `host` (hostname) and `mountpoint` (e.g., `/var/lib/pgsql`)
 
 **How it works:**
-1. During primary health check, captures total database size
-2. For replicas using pg_basebackup, queries Prometheus for filesystem usage
-3. Estimates progress: `(used_bytes / primary_db_size) * 100`
-4. Progress stored in analysis results (0-10000, where 4156 = 41.56%)
+1. Fetches filesystem metrics for all nodes in the cluster at startup using a single batch query (e.g., `host=~"dev-pg-app001.*"`)
+2. For replicas using pg_basebackup, compares the replica's filesystem used bytes against the primary's filesystem used bytes
+3. Estimates progress: `(replica_used_bytes / primary_used_bytes) * 100`
+4. Progress stored as percentage * 100 (e.g., 4156 = 41.56%), keyed by replica IP address
 
-**Note:** This is a rough estimate assuming filesystem usage is mostly from the backup. May be inaccurate if significant other data exists on the filesystem.
+**Note:** This is a filesystem-to-filesystem comparison (not database size), chosen for performance reasons as querying database size is too slow on large clusters. This is a rough estimate assuming both filesystems primarily contain PostgreSQL data. Will be inaccurate if filesystems have significantly different amounts of other data. As of this writing, the system queries the pgsql mount point, so it shouldn't drift too far. Except for WAL, logs etc...
 
 ## Configuration
 
