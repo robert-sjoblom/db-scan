@@ -763,12 +763,12 @@ fn pg_lsn_diff(lsn1: &str, lsn2: &str) -> Option<u64> {
 ///
 /// This is a rough estimate assuming the used bytes on the replica are mostly from the backup.
 /// This may be inaccurate if there's other data on the filesystem.
-fn estimate_backup_progress(primary_db_size: u64, replica_used_bytes: u64) -> u16 {
-    if primary_db_size == 0 {
+fn estimate_backup_progress(primary_used_bytes: u64, replica_used_bytes: u64) -> u16 {
+    if primary_used_bytes == 0 {
         return 0;
     }
 
-    let progress = (replica_used_bytes as f64 / primary_db_size as f64) * 10000.0;
+    let progress = (replica_used_bytes as f64 / primary_used_bytes as f64) * 10000.0;
     progress.min(10000.0) as u16
 }
 
