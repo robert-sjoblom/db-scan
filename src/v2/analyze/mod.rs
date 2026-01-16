@@ -91,33 +91,17 @@ async fn fetch_backup_progress(
     cluster: &Cluster,
     http_client: Option<&ClientWithMiddleware>,
 ) -> HashMap<String, u16> {
-    use crate::v2::scan::Role;
-
     let mut progress = HashMap::new();
+
+    let Some((total_db_size, replication_conns)) = cluster.primary_replication_info() else {
+        return progress;
+    };
 
     // No client available, skip prometheus queries
     let http_client = match http_client {
         Some(c) => c,
         None => {
             tracing::debug!("no prometheus client available");
-            return progress;
-        }
-    };
-
-    // Find the primary node
-    let primary = match cluster.primary() {
-        Some(p) => p,
-        None => {
-            tracing::debug!("no primary node found in cluster");
-            return progress;
-        }
-    };
-
-    // Get primary DB size and replication connections
-    let (total_db_size, replication_conns) = match &primary.role {
-        Role::Primary { health } => (health.total_db_size_bytes, &health.replication),
-        _ => {
-            tracing::debug!("primary node has no health data");
             return progress;
         }
     };
