@@ -1,0 +1,73 @@
+{
+  "http_interactions": [
+    {
+      "response": {
+        "body": {
+          "encoding": null,
+          "string": "{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":[{\"metric\":{\"__name__\":\"node_filesystem_avail_bytes\",\"dc\":\"az3\",\"device\":\"/dev/mapper/vg_pgsql-lv_pgsql\",\"fstype\":\"xfs\",\"host\":\"dev-pg-app001-db003.az3.example.com\",\"instance\":\"127.3.12.151:9999\",\"job\":\"node\",\"mountpoint\":\"/var/lib/pgsql\",\"subnet\":\"127.3.12.0/24\",\"team\":\"sudo\"},\"value\":[1768601283.428,\"127598039040\"]},{\"metric\":{\"__name__\":\"node_filesystem_avail_bytes\",\"dc\":\"az2\",\"device\":\"/dev/mapper/vg_pgsql-lv_pgsql\",\"fstype\":\"xfs\",\"host\":\"dev-pg-app001-db002.az2.example.com\",\"instance\":\"127.2.12.151:9999\",\"job\":\"node\",\"mountpoint\":\"/var/lib/pgsql\",\"subnet\":\"127.2.12.0/24\",\"team\":\"sudo\"},\"value\":[1768601283.428,\"127658127360\"]},{\"metric\":{\"__name__\":\"node_filesystem_avail_bytes\",\"dc\":\"az1\",\"device\":\"/dev/mapper/vg_pgsql-lv_pgsql\",\"fstype\":\"xfs\",\"host\":\"dev-pg-app001-db001.az1.example.com\",\"instance\":\"127.1.12.151:9999\",\"job\":\"node\",\"mountpoint\":\"/var/lib/pgsql\",\"subnet\":\"127.1.12.0/24\",\"team\":\"sudo\"},\"value\":[1768601283.428,\"126906880000\"]}]}}"
+        },
+        "http_version": "1.1",
+        "status": {
+          "code": 200,
+          "message": "OK"
+        },
+        "headers": {
+          "content-length": [
+            "1013"
+          ],
+          "content-type": [
+            "application/json"
+          ],
+          "date": [
+            "Fri, 16 Jan 2026 22:08:03 GMT"
+          ]
+        }
+      },
+      "request": {
+        "uri": "https://prometheus.example.com/api/v1/query?query=node_filesystem_avail_bytes%7Bhost%3D%7E%22dev-pg-app001.*%22%2Cmountpoint%3D%22%2Fvar%2Flib%2Fpgsql%22%2Cfstype%21%3D%22rootfs%22%7D",
+        "body": {
+          "encoding": null,
+          "string": ""
+        },
+        "method": "get",
+        "headers": {}
+      },
+      "recorded_at": "Fri, 16 Jan 2026 22:08:03 +0000"
+    },
+    {
+      "response": {
+        "body": {
+          "encoding": null,
+          "string": "{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":[{\"metric\":{\"__name__\":\"node_filesystem_size_bytes\",\"dc\":\"az3\",\"device\":\"/dev/mapper/vg_pgsql-lv_pgsql\",\"fstype\":\"xfs\",\"host\":\"dev-pg-app001-db003.az3.example.com\",\"instance\":\"127.3.12.151:9999\",\"job\":\"node\",\"mountpoint\":\"/var/lib/pgsql\",\"subnet\":\"127.3.12.0/24\",\"team\":\"sudo\"},\"value\":[1768601283.435,\"214622547968\"]},{\"metric\":{\"__name__\":\"node_filesystem_size_bytes\",\"dc\":\"az2\",\"device\":\"/dev/mapper/vg_pgsql-lv_pgsql\",\"fstype\":\"xfs\",\"host\":\"dev-pg-app001-db002.az2.example.com\",\"instance\":\"127.2.12.151:9999\",\"job\":\"node\",\"mountpoint\":\"/var/lib/pgsql\",\"subnet\":\"127.2.12.0/24\",\"team\":\"sudo\"},\"value\":[1768601283.435,\"214691745792\"]},{\"metric\":{\"__name__\":\"node_filesystem_size_bytes\",\"dc\":\"az1\",\"device\":\"/dev/mapper/vg_pgsql-lv_pgsql\",\"fstype\":\"xfs\",\"host\":\"dev-pg-app001-db001.az1.example.com\",\"instance\":\"127.1.12.151:9999\",\"job\":\"node\",\"mountpoint\":\"/var/lib/pgsql\",\"subnet\":\"127.1.12.0/24\",\"team\":\"sudo\"},\"value\":[1768601283.435,\"214691745792\"]}]}}"
+        },
+        "http_version": "1.1",
+        "status": {
+          "code": 200,
+          "message": "OK"
+        },
+        "headers": {
+          "content-type": [
+            "application/json"
+          ],
+          "date": [
+            "Fri, 16 Jan 2026 22:08:03 GMT"
+          ],
+          "content-length": [
+            "1010"
+          ]
+        }
+      },
+      "request": {
+        "uri": "https://prometheus.example.com/api/v1/query?query=node_filesystem_size_bytes%7Bhost%3D%7E%22dev-pg-app001.*%22%2Cmountpoint%3D%22%2Fvar%2Flib%2Fpgsql%22%2Cfstype%21%3D%22rootfs%22%7D",
+        "body": {
+          "encoding": null,
+          "string": ""
+        },
+        "method": "get",
+        "headers": {}
+      },
+      "recorded_at": "Fri, 16 Jan 2026 22:08:03 +0000"
+    }
+  ],
+  "recorded_with": "rVCR 0.2.2"
+}

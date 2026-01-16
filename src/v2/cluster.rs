@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::v2::scan::AnalyzedNode;
+use crate::v2::scan::{AnalyzedNode, health_check_primary::ReplicationConnection};
 
 /// Listens for incoming Nodes, groups them by cluster_id, and sends complete Clusters
 /// to the provided cluster channel. A Cluster is considered complete when it has 3 Nodes.
@@ -71,6 +71,27 @@ impl Cluster {
 
     /// Returns the primary node if exactly one exists
     pub fn primary(&self) -> Option<&AnalyzedNode> {
-        self.nodes.iter().find(|n| n.role.is_primary())
+        let primaries: Vec<_> = self.primaries().collect();
+        if primaries.len() == 1 {
+            primaries.first().copied()
+        } else {
+            tracing::debug!(
+                primary_count = primaries.len(),
+                "no single primary found in cluster"
+            );
+            None
+        }
+    }
+}
+
+impl Cluster {
+    /// Returns replication connections from the primary (if there's only one primary)
+    pub fn primary_replication_info(&self) -> Option<&Vec<ReplicationConnection>> {
+        use super::scan::Role;
+
+        self.primary().and_then(|p| match &p.role {
+            Role::Primary { health } => Some(&health.replication),
+            _ => None,
+        })
     }
 }
