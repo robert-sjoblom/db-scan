@@ -58,11 +58,11 @@ struct Args {
     silence_tracing: bool,
 
     /// Default user to use when not connecting with cert auth
-    #[arg(long)]
+    #[arg(long, env = "DEFAULT_USER")]
     default_user: String,
 
     /// Default password to use when not connecting with cert auth
-    #[arg(long)]
+    #[arg(long, env = "DEFAULT_PASS")]
     default_pass: String,
 
     /// Write CSV output to file
