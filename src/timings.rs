@@ -5,7 +5,7 @@ use std::{
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
-#[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Ord, Copy, Clone)]
 pub enum Stage {
     Prometheus,
     DatabasePortal,
