@@ -5,17 +5,25 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_postgres::Client;
 use tracing::instrument;
 
-use crate::v2::{
-    db::{self, DbError},
-    node::Node,
-    scan::health_check_primary::PrimaryHealthCheckResult,
+use crate::{
+    timings::{Event, Stage},
+    v2::{
+        db::{self, DbError},
+        node::Node,
+        scan::health_check_primary::PrimaryHealthCheckResult,
+    },
 };
 
 pub mod health_check_primary;
 pub mod health_check_replica;
 
 #[instrument(skip_all, level = "info")]
-pub async fn scan_nodes(tx: UnboundedSender<AnalyzedNode>, nodes: impl Iterator<Item = Node>) {
+pub async fn scan_nodes(
+    tx: UnboundedSender<AnalyzedNode>,
+    nodes: impl Iterator<Item = Node>,
+    timings_tx: UnboundedSender<Event>,
+) {
+    timings_tx.send(Event::Start(Stage::Scan)).ok();
     let handles = nodes.into_iter().map(|node| {
         let tx = tx.clone();
         tokio::spawn(async move { scan(node, tx).await })
@@ -23,6 +31,7 @@ pub async fn scan_nodes(tx: UnboundedSender<AnalyzedNode>, nodes: impl Iterator<
     futures::future::join_all(handles).await;
 
     tracing::info!("node scanning completed");
+    timings_tx.send(Event::End(Stage::Scan)).ok();
 }
 
 #[instrument(skip(tx), level = "debug", fields(node_name = %node.node_name, node_id = node.id))]

@@ -1,14 +1,20 @@
-use std::{path::PathBuf, sync::OnceLock, time::Instant};
+use std::{collections::HashMap, path::PathBuf, sync::OnceLock, time::Instant};
 
 use clap::Parser;
 use redact::Secret;
+use tracing::instrument;
 use tracing_subscriber::EnvFilter;
 
-use crate::v2::{analyze::ClusterHealth, cluster::Cluster, scan::AnalyzedNode};
+use crate::{
+    prometheus::FileSystemMetrics,
+    timings::{Event, Stage},
+    v2::{analyze::ClusterHealth, cluster::Cluster, node::Node, scan::AnalyzedNode},
+};
 
 mod database_portal;
 mod logging;
 mod prometheus;
+mod timings;
 mod v2;
 
 static ARGS: OnceLock<Args> = OnceLock::new();
@@ -106,34 +112,81 @@ async fn main() {
 
     ARGS.set(args).unwrap();
 
-    let batch_filesystem_data = {
-        let start = std::time::Instant::now();
-        let data =
-            prometheus::client::get_batch_filesystem_data(ARGS.get().unwrap().cluster()).await;
-        let elapsed = start.elapsed();
-
-        if data.is_empty() {
-            tracing::warn!(
-                elapsed_ms = elapsed.as_millis(),
-                "no prometheus metrics fetched, backup progress will be unavailable"
-            );
-        } else {
-            tracing::info!(
-                metric_count = data.len(),
-                elapsed_ms = elapsed.as_millis(),
-                "fetched prometheus filesystem metrics"
-            );
-        }
-        data
-    };
-
+    let (timings_tx, timings_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     let (node_tx, node_rx) = tokio::sync::mpsc::unbounded_channel::<AnalyzedNode>();
     let (cluster_tx, cluster_rx) = tokio::sync::mpsc::unbounded_channel::<Cluster>();
     let (analyze_tx, analyze_rx) = tokio::sync::mpsc::unbounded_channel::<ClusterHealth>();
 
-    tokio::spawn(v2::cluster::cluster_builder(node_rx, cluster_tx));
+    // Set up timings handle first, since others will send on the channel
+    let timings_handle = tokio::spawn(timings::reporter(timings_rx));
 
-    let nodes = database_portal::nodes()
+    timings_tx.send(Event::Start(Stage::Prometheus)).ok();
+    let batch_data = batch_filesystem_data().await;
+    timings_tx.send(Event::End(Stage::Prometheus)).ok();
+
+    tokio::spawn(v2::cluster::cluster_builder(
+        node_rx,
+        cluster_tx,
+        timings_tx.clone(),
+    ));
+
+    timings_tx.send(Event::Start(Stage::DatabasePortal)).ok();
+    let nodes = filter_nodes().await;
+    timings_tx.send(Event::End(Stage::DatabasePortal)).ok();
+
+    let scan_handle = tokio::spawn(v2::scan::scan_nodes(node_tx, nodes, timings_tx.clone()));
+    let analyze_handle = tokio::spawn(v2::analyze::analyze_clusters(
+        batch_data,
+        cluster_rx,
+        analyze_tx,
+        timings_tx.clone(),
+    ));
+    let writer_handle = tokio::spawn(v2::writer::write_results(
+        analyze_rx,
+        writer_options,
+        timings_tx.clone(),
+    ));
+
+    let (_, _, writer_result) =
+        tokio::try_join!(scan_handle, analyze_handle, writer_handle).expect("Task failed");
+
+    timings_tx.send(Event::Complete).ok();
+    drop(timings_tx);
+
+    let elapsed = now.elapsed();
+    tracing::info!(
+        duration_ms = elapsed.as_millis(),
+        duration_secs = elapsed.as_secs_f64(),
+        "scan completed"
+    );
+
+    match timings_handle.await {
+        Ok(Some(s)) => print!("{s}"),
+        Ok(None) => {}
+        Err(e) => tracing::error!(error = %e, "timings_handle join error"),
+    }
+
+    print!("{}", writer_result);
+}
+
+#[instrument(level = "debug")]
+async fn batch_filesystem_data() -> HashMap<String, FileSystemMetrics> {
+    let data = prometheus::client::get_batch_filesystem_data(ARGS.get().unwrap().cluster()).await;
+
+    if data.is_empty() {
+        tracing::warn!("no prometheus metrics fetched, backup progress will be unavailable");
+    } else {
+        tracing::info!(
+            metric_count = data.len(),
+            "fetched prometheus filesystem metrics"
+        );
+    }
+    data
+}
+
+// TODO! Fix this unwrap, it's not healthy
+async fn filter_nodes() -> impl Iterator<Item = Node> {
+    database_portal::nodes()
         .await
         .unwrap()
         .into_iter()
@@ -144,26 +197,5 @@ async fn main() {
                 true
             }
         })
-        .inspect(|n| tracing::trace!(node_id = n.id, node_name = %n.node_name, cluster_id = n.cluster_id, "fetched node"));
-
-    let scan_handle = tokio::spawn(v2::scan::scan_nodes(node_tx, nodes));
-    let analyze_handle = tokio::spawn(v2::analyze::analyze_clusters(
-        batch_filesystem_data,
-        cluster_rx,
-        analyze_tx,
-    ));
-    let writer_handle = tokio::spawn(v2::writer::write_results(analyze_rx, writer_options));
-
-    let (_, _, writer_result) =
-        tokio::try_join!(scan_handle, analyze_handle, writer_handle).expect("Task failed");
-
-    let elapsed = now.elapsed();
-    tracing::info!(
-        duration_ms = elapsed.as_millis(),
-        duration_secs = elapsed.as_secs_f64(),
-        "scan completed"
-    );
-
-    // Print terminal output after all logging is done
-    print!("{}", writer_result);
+        .inspect(|n| tracing::trace!(node_id = n.id, node_name = %n.node_name, cluster_id = n.cluster_id, "fetched node"))
 }

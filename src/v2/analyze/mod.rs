@@ -5,6 +5,7 @@ use tracing::instrument;
 
 use crate::{
     prometheus::FileSystemMetrics,
+    timings::{Event, Stage},
     v2::{
         cluster::Cluster,
         scan::{AnalyzedNode, Role},
@@ -41,9 +42,10 @@ pub async fn analyze_clusters(
     batch_data: HashMap<Ip, FileSystemMetrics>,
     mut cluster_rx: UnboundedReceiver<Cluster>,
     analyzed_tx: UnboundedSender<ClusterHealth>,
+    timings_tx: UnboundedSender<Event>,
 ) {
+    timings_tx.send(Event::Start(Stage::Analyze)).ok();
     tracing::info!("cluster analysis task started");
-
     while let Some(cluster) = cluster_rx.recv().await {
         let analyzed = analyze_with_enrichment(cluster, &batch_data);
 
@@ -56,6 +58,7 @@ pub async fn analyze_clusters(
     if cluster_rx.is_closed() {
         tracing::info!("cluster channel closed, analysis task exiting");
     }
+    timings_tx.send(Event::End(Stage::Analyze)).ok();
 }
 
 /// Calculates backup progress before analyzing the cluster, allowing us to
