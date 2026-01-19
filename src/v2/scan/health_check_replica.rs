@@ -153,6 +153,7 @@ async fn execute_replica_health_check(
     tracing::debug!("executing replica health check query");
 
     let row = client.query_one(HEALTH_CHECK_REPLICA_QUERY, &[]).await?;
+    tracing::debug!(row = ?row, "replica health check query executed");
 
     // Get JSONB as text and parse it
     let json_text: String = row.get(0);

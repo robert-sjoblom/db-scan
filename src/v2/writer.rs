@@ -5,11 +5,14 @@ use std::{
     path::Path,
 };
 
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::v2::{
-    analyze::{AnalyzedCluster, ClusterHealth, Reason, SplitBrainInfo, SplitBrainResolution},
-    scan::health_check_primary::ReplicationConnection,
+use crate::{
+    timings::{Event, Stage},
+    v2::{
+        analyze::{AnalyzedCluster, ClusterHealth, Reason, SplitBrainInfo, SplitBrainResolution},
+        scan::health_check_primary::ReplicationConnection,
+    },
 };
 
 /// ANSI color codes for terminal output
@@ -131,7 +134,9 @@ impl CsvWriter {
 pub async fn write_results(
     mut analyze_rx: UnboundedReceiver<ClusterHealth>,
     options: WriterOptions,
+    timings_tx: UnboundedSender<Event>,
 ) -> String {
+    timings_tx.send(Event::Start(Stage::Write)).ok();
     let mut rows: Vec<OutputRow> = Vec::new();
 
     // Initialize CSV writer if path provided
@@ -171,7 +176,9 @@ pub async fn write_results(
     // Sort by severity (Healthy first, then Unknown, Degraded, Critical), then cluster alphabetically
     rows.sort();
 
-    build_terminal_output(&rows, &options)
+    let output = build_terminal_output(&rows, &options);
+    timings_tx.send(Event::End(Stage::Write)).ok();
+    output
 }
 
 /// Extract an OutputRow from ClusterHealth, returning None if it should be filtered out

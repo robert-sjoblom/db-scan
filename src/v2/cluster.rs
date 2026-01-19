@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::v2::scan::{AnalyzedNode, health_check_primary::ReplicationConnection};
+use crate::{
+    timings::{Event, Stage},
+    v2::scan::{AnalyzedNode, health_check_primary::ReplicationConnection},
+};
 
 /// Listens for incoming Nodes, groups them by cluster_id, and sends complete Clusters
 /// to the provided cluster channel. A Cluster is considered complete when it has 3 Nodes.
@@ -12,7 +15,9 @@ use crate::v2::scan::{AnalyzedNode, health_check_primary::ReplicationConnection}
 pub async fn cluster_builder(
     mut node_rx: UnboundedReceiver<AnalyzedNode>,
     cluster_tx: UnboundedSender<Cluster>,
+    timings_tx: UnboundedSender<Event>,
 ) {
+    timings_tx.send(Event::Start(Stage::Clustering)).ok();
     let mut nodes: HashMap<u32, Vec<AnalyzedNode>> = HashMap::new();
 
     while let Some(node) = node_rx.recv().await {
@@ -48,6 +53,7 @@ pub async fn cluster_builder(
     } else {
         tracing::info!("node channel closed, all clusters processed");
     }
+    timings_tx.send(Event::End(Stage::Clustering)).ok();
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
