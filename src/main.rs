@@ -7,13 +7,21 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     prometheus::FileSystemMetrics,
+    task_group::TaskGroup,
     timings::{Event, Stage},
-    v2::{analyze::ClusterHealth, cluster::Cluster, node::Node, scan::AnalyzedNode},
+    v2::{
+        analyze::{ClusterHealth, analyze_clusters},
+        cluster::{Cluster, cluster_builder},
+        node::Node,
+        scan::{AnalyzedNode, scan_nodes},
+        writer::write_results,
+    },
 };
 
 mod database_portal;
 mod logging;
 mod prometheus;
+mod task_group;
 mod timings;
 mod v2;
 
@@ -117,38 +125,38 @@ async fn main() {
     let (cluster_tx, cluster_rx) = tokio::sync::mpsc::unbounded_channel::<Cluster>();
     let (analyze_tx, analyze_rx) = tokio::sync::mpsc::unbounded_channel::<ClusterHealth>();
 
+    // TODO: we should move this to the task_group too
     // Set up timings handle first, since others will send on the channel
     let timings_handle = tokio::spawn(timings::reporter(timings_rx));
+
+    let mut tasks = TaskGroup::new();
 
     timings_tx.send(Event::Start(Stage::Prometheus)).ok();
     let batch_data = batch_filesystem_data().await;
     timings_tx.send(Event::End(Stage::Prometheus)).ok();
 
-    tokio::spawn(v2::cluster::cluster_builder(
-        node_rx,
-        cluster_tx,
-        timings_tx.clone(),
-    ));
+    tasks.spawn(
+        Stage::Clustering,
+        cluster_builder(node_rx, cluster_tx, timings_tx.clone()),
+    );
 
     timings_tx.send(Event::Start(Stage::DatabasePortal)).ok();
     let nodes = filter_nodes().await;
     timings_tx.send(Event::End(Stage::DatabasePortal)).ok();
 
-    let scan_handle = tokio::spawn(v2::scan::scan_nodes(node_tx, nodes, timings_tx.clone()));
-    let analyze_handle = tokio::spawn(v2::analyze::analyze_clusters(
-        batch_data,
-        cluster_rx,
-        analyze_tx,
-        timings_tx.clone(),
-    ));
-    let writer_handle = tokio::spawn(v2::writer::write_results(
-        analyze_rx,
-        writer_options,
-        timings_tx.clone(),
-    ));
+    tasks.spawn(Stage::Scan, scan_nodes(node_tx, nodes, timings_tx.clone()));
 
-    let (_, _, writer_result) =
-        tokio::try_join!(scan_handle, analyze_handle, writer_handle).expect("Task failed");
+    tasks.spawn(
+        Stage::Analyze,
+        analyze_clusters(batch_data, cluster_rx, analyze_tx, timings_tx.clone()),
+    );
+
+    tasks.spawn_returning(
+        Stage::Write,
+        write_results(analyze_rx, writer_options, timings_tx.clone()),
+    );
+
+    let results = tasks.run().await;
 
     timings_tx.send(Event::Complete).ok();
     drop(timings_tx);
@@ -166,7 +174,14 @@ async fn main() {
         Err(e) => tracing::error!(error = %e, "timings_handle join error"),
     }
 
-    print!("{}", writer_result);
+    match results {
+        Ok(v) => {
+            for (_, s) in v {
+                print!("{s}");
+            }
+        }
+        Err(e) => tracing::error!(error = %e, "task failed"),
+    }
 }
 
 #[instrument(level = "debug")]
