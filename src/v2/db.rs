@@ -5,7 +5,7 @@ use postgres_native_tls::MakeTlsConnector;
 use tokio_postgres::{Client, Config, Connection, Socket, config::SslMode};
 use tracing::instrument;
 
-use crate::{CONFIG, DbScanConfig, v2::node::Node};
+use crate::{CONFIG, config::DbScanConfig, v2::node::Node};
 pub use db_error::DbError;
 
 mod db_error;
