@@ -25,12 +25,12 @@ mod task_group;
 mod timings;
 mod v2;
 
-static ARGS: OnceLock<Args> = OnceLock::new();
+static CONFIG: OnceLock<DbScanConfig> = OnceLock::new();
 
 /// A tool to scan PostgreSQL clusters for configuration and health
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
-struct Args {
+struct DbScanConfig {
     /// Your PG User
     #[arg(long, env = "PGUSER")]
     pguser: String,
@@ -88,7 +88,7 @@ struct Args {
     no_color: bool,
 }
 
-impl Args {
+impl DbScanConfig {
     fn cluster(&self) -> String {
         self.cluster
             .as_ref()
@@ -101,7 +101,7 @@ impl Args {
 async fn main() {
     let now = Instant::now();
 
-    let args = Args::parse();
+    let args = DbScanConfig::parse();
 
     if !args.silence_tracing {
         logging::setup(args.log_level.clone());
@@ -118,7 +118,7 @@ async fn main() {
         no_color: args.no_color,
     };
 
-    ARGS.set(args).unwrap();
+    CONFIG.set(args).unwrap();
 
     let (timings_tx, timings_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     let (node_tx, node_rx) = tokio::sync::mpsc::unbounded_channel::<AnalyzedNode>();
@@ -186,7 +186,7 @@ async fn main() {
 
 #[instrument(level = "debug")]
 async fn batch_filesystem_data() -> HashMap<String, FileSystemMetrics> {
-    let data = prometheus::client::get_batch_filesystem_data(ARGS.get().unwrap().cluster()).await;
+    let data = prometheus::client::get_batch_filesystem_data(CONFIG.get().unwrap().cluster()).await;
 
     if data.is_empty() {
         tracing::warn!("no prometheus metrics fetched, backup progress will be unavailable");
@@ -206,7 +206,7 @@ async fn filter_nodes() -> impl Iterator<Item = Node> {
         .unwrap()
         .into_iter()
         .filter(|n| {
-            if let Some(cluster) = &ARGS.get().unwrap().cluster {
+            if let Some(cluster) = &CONFIG.get().unwrap().cluster {
                 n.cluster_name().contains(cluster)
             } else {
                 true

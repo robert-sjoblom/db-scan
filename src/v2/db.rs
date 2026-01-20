@@ -5,7 +5,7 @@ use postgres_native_tls::MakeTlsConnector;
 use tokio_postgres::{Client, Config, Connection, Socket, config::SslMode};
 use tracing::instrument;
 
-use crate::{ARGS, Args, v2::node::Node};
+use crate::{CONFIG, DbScanConfig, v2::node::Node};
 pub use db_error::DbError;
 
 mod db_error;
@@ -32,7 +32,7 @@ pub async fn connect(node: &Node) -> Result<(Client, PgConnection), DbError> {
 
 fn pg_cfg(node: &Node) -> Config {
     tracing::trace!(node_name = %node.node_name, "building pg config");
-    let args = ARGS.get().expect("Args initialized");
+    let args = CONFIG.get().expect("Args initialized");
     let mut cfg = Config::new();
 
     cfg.host(&node.node_name)
@@ -59,7 +59,7 @@ pub fn connector() -> &'static MakeTlsConnector {
     CONNECTOR.get().expect("Connector initialized")
 }
 
-pub fn setup(cfg: &Args) {
+pub fn setup(cfg: &DbScanConfig) {
     tracing::info!("setting up TLS connector");
     CONNECTOR.get_or_init(|| {
         let identity = Identity::from_pkcs8(
