@@ -20,6 +20,7 @@ use crate::{
 mod config;
 mod database_portal;
 mod logging;
+mod pipeline;
 mod prometheus;
 mod task_group;
 mod timings;
