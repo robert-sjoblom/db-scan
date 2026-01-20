@@ -1,12 +1,12 @@
 # db-scan Specification
 
-**Version:** 1.0
+**Version:** 2.0
 **Status:** Draft
 **Last Updated:** 2026-01-20
 
 ## Executive Summary
 
-db-scan is a PostgreSQL cluster health monitoring tool designed for Fortnox's infrastructure. It performs concurrent health checks across PostgreSQL clusters, classifies their health states, and provides actionable diagnostics for operators. The tool is currently a read-only diagnostic utility with a planned evolution toward alert integration and a plugin-based extensibility model.
+db-scan is a PostgreSQL cluster health monitoring tool designed for Fortnox's infrastructure. It performs concurrent health checks across PostgreSQL clusters, classifies their health states, and provides actionable diagnostics for operators. The tool supports three operating modes: single-scan CLI, watch mode with terminal UI, and long-running service mode with HTTP API.
 
 ---
 
@@ -14,71 +14,243 @@ db-scan is a PostgreSQL cluster health monitoring tool designed for Fortnox's in
 
 ### 1.1 Pipeline Model
 
+**CLI Mode (single scan):**
 ```
-Node Discovery → Parallel Scanning → Cluster Aggregation → Analysis → Plugin Processing → Output
-      ↓                                                                                    ↓
- Database Portal                                                              Terminal / CSV / Metrics
- (with caching)
+┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌──────────────┐   ┌──────────┐   ┌────────┐
+│ Portal      │──▶│ Prometheus  │──▶│ Node        │──▶│ Cluster      │──▶│ Analysis │──▶│ Output │
+│ Discovery   │   │ Thresholds  │   │ Scanner     │   │ Aggregation  │   │          │   │        │
+└─────────────┘   └─────────────┘   └─────────────┘   └──────────────┘   └──────────┘   └────────┘
+```
+
+**Service Mode (continuous):**
+```
+                                    ┌─────────────────────────────────────────────────────┐
+                                    │                   Scan Loop                         │
+┌──────────────────┐                │  ┌─────────┐   ┌─────────┐   ┌──────────┐   ┌────┐  │
+│ Data Source      │───────────────▶│  │ Scanner │──▶│ Cluster │──▶│ Analysis │──▶│Out │  │
+│ Registry         │  nodes +       │  └─────────┘   └─────────┘   └──────────┘   └────┘  │
+│                  │  thresholds    └─────────────────────────────────────────────────────┘
+│ ┌──────────────┐ │                                      │
+│ │ Portal       │ │                                      │
+│ │ (background) │ │                                      ▼
+│ └──────────────┘ │                              ┌───────────────┐
+│ ┌──────────────┐ │                              │ State Tracker │
+│ │ Prometheus   │ │                              │ (durations,   │
+│ │ (background) │ │                              │  transitions) │
+│ └──────────────┘ │                              └───────────────┘
+└──────────────────┘                                      │
+        ▲                                                 │
+        │                         ┌───────────────────────┼───────────────────────┐
+        │                         │                       ▼                       │
+   ┌────┴────┐              ┌─────┴─────┐          ┌──────────────┐        ┌──────┴──────┐
+   │ HTTP    │◀─────────────│ /scan     │          │ /metrics     │        │ /health     │
+   │ Server  │  on-demand   │ (trigger) │          │ (prometheus) │        │ (liveness)  │
+   └─────────┘              └───────────┘          └──────────────┘        └─────────────┘
 ```
 
 ### 1.2 Core Design Principles
 
-1. **Graceful Degradation**: Partial visibility is better than total failure. One unreachable node or failed cluster scan does not block monitoring of others.
+1. **Graceful Degradation**: Partial visibility is better than total failure. One unreachable node, failed data source, or cluster scan does not block monitoring of others.
 
-2. **Stateless Execution**: Each scan is independent. No state persistence between runs. Historical tracking and trend analysis are delegated to external systems (Prometheus, logging infrastructure).
+2. **Stateful Service, Stateless Scans**: The service maintains state (data source health, cluster state durations), but each scan cycle is independent. State is reconstructable from a fresh start.
 
-3. **Future-Aware Design**: While currently read-only diagnostic, architecture decisions should accommodate future alert integration without major refactoring.
+3. **Availability Over Accuracy**: When data sources are degraded, prefer serving potentially stale data with explicit freshness warnings over failing entirely.
 
-4. **Availability Over Accuracy**: When infrastructure components (portal API, Prometheus) are degraded, prefer serving potentially stale data with warnings over failing entirely.
-
----
-
-## 2. Node Discovery
-
-### 2.1 Database Portal Integration
-
-- **Source**: REST API at configured endpoint (default: `https://database.fnox.se/api/v1/nodes`)
-- **Data**: Node inventory including IP address, cluster_id, node_name, pg_version
-
-### 2.2 Caching Behavior
-
-- **TTL**: 24-hour file cache at `/tmp/nodes_response.json`
-- **Stale Cache Policy**: If portal is unreachable and cache is expired:
-  - Use stale cache data
-  - Display prominent warning in output indicating staleness
-  - Include cache age in warning message
-- **Watch Mode Refresh**: Background refresh of portal cache during watch mode to detect new/removed clusters without operator intervention
+4. **Observable by Default**: Service mode exposes metrics, health endpoints, and structured logs suitable for production monitoring.
 
 ---
 
-## 3. Scanning
+## 2. Data Source Management
 
-### 3.1 Connection Strategy
+### 2.1 Data Source Registry
+
+The service maintains a registry of external data sources, each with independent health tracking:
+
+```rust
+struct DataSourceHealth {
+    last_success: Option<Instant>,
+    last_attempt: Instant,
+    consecutive_failures: u32,
+    last_error: Option<String>,
+    state: DataSourceState,
+}
+
+enum DataSourceState {
+    Healthy,                    // Recent successful fetch
+    Degraded { since: Instant }, // Failures but have cached data
+    Unavailable,                // No cached data available
+}
+```
+
+### 2.2 Database Portal
+
+**Purpose**: Node inventory (IP, cluster_id, node_name, pg_version)
+
+**Source**: REST API at configured endpoint (default: `https://database.example.com/api/v1/nodes`)
+
+**Fetch Strategy**:
+- **Service mode**: Background task fetches every 5 minutes (configurable)
+- **CLI mode**: Fetch once at startup, cache to file for subsequent runs within 24h
+- **File cache**: `/tmp/nodes_response.json`
+
+**Failure Handling**:
+- On failure, retain last-known-good data
+- Mark source as `Degraded`
+- Include staleness warning in scan output
+- After 1 hour of failures, escalate logging severity
+
+**Data Contract**:
+```rust
+struct PortalData {
+    nodes: Vec<Node>,
+    fetched_at: Instant,
+    freshness: DataFreshness,
+}
+
+enum DataFreshness {
+    Fresh,                      // Fetched within expected interval
+    Stale { age: Duration },    // Older than expected but usable
+    Unknown,                    // No successful fetch yet (startup)
+}
+```
+
+### 2.3 Prometheus
+
+**Purpose**:
+- Dynamic lag thresholds (WAL generation rate history)
+- Filesystem metrics for backup progress
+
+**Fetch Strategy**:
+- **Service mode**: Background task fetches every 60 seconds
+- **CLI mode**: Fetch once at startup
+
+**Failure Handling**:
+- On failure, retain last-known thresholds
+- Fall back to static defaults if no cached data (80MB based on 16MB/s × 5s)
+- Mark source as `Degraded`
+- Continue scans with reduced accuracy
+
+**Data Contract**:
+```rust
+struct PrometheusData {
+    lag_thresholds: HashMap<ClusterId, LagThreshold>,
+    filesystem_metrics: HashMap<ClusterId, FileSystemMetrics>,
+    fetched_at: Instant,
+    freshness: DataFreshness,
+}
+
+struct LagThreshold {
+    value_bytes: u64,
+    source: ThresholdSource,
+}
+
+enum ThresholdSource {
+    Calculated { p95_rate: f64, tolerance_secs: u64 },
+    Static { reason: &'static str },
+}
+```
+
+### 2.4 Freshness Propagation
+
+Each scan receives a `ScanContext` that includes freshness metadata:
+
+```rust
+struct ScanContext {
+    nodes: Vec<Node>,
+    portal_freshness: DataFreshness,
+
+    lag_thresholds: HashMap<ClusterId, LagThreshold>,
+    prometheus_freshness: DataFreshness,
+
+    scan_requested_at: Instant,
+}
+```
+
+Analysis and output stages use this to:
+- Annotate results with data source warnings
+- Adjust confidence in health classifications
+- Include freshness in metrics labels
+
+---
+
+## 3. State Tracking
+
+### 3.1 Cluster State History
+
+The service tracks state transitions for each cluster:
+
+```rust
+struct ClusterStateHistory {
+    current_state: ClusterHealth,
+    current_state_since: Instant,
+    previous_state: Option<ClusterHealth>,
+    transition_count_24h: u32,
+}
+```
+
+**Use Cases**:
+- "This cluster has been Degraded for 10 minutes"
+- "This cluster has flapped 5 times in the last hour"
+- State duration exposed as Prometheus metric
+
+### 3.2 State Persistence
+
+**In-memory only**: State is not persisted to disk. On restart:
+- All clusters start with unknown duration
+- First scan establishes baseline
+- Metrics show `state_duration_seconds` as time since service start until second scan
+
+**Rationale**: Simplicity. External systems (Prometheus, logs) provide historical data if needed.
+
+### 3.3 Transition Events
+
+State changes emit structured events:
+
+```rust
+struct StateTransition {
+    cluster_id: String,
+    from: ClusterHealth,
+    to: ClusterHealth,
+    timestamp: Instant,
+    duration_in_previous_state: Duration,
+}
+```
+
+Events are:
+- Logged at INFO level
+- Exposed via `/events` SSE endpoint (optional)
+- Counted in Prometheus metrics
+
+---
+
+## 4. Scanning
+
+### 4.1 Connection Strategy
 
 - **Concurrency**: Async tasks per node via tokio
 - **mTLS**: Required for production and specific dev clusters (`dev-pg-app006`, `dev-pg-app010`, `dev-pg-app011`)
-- **Certificate Hot-Reload**: Detect certificate file changes and reload without restart during long-running watch sessions
+- **Certificate Hot-Reload**: Detect certificate file changes and reload without restart during long-running sessions
 
-### 3.2 Retry Logic
+### 4.2 Retry Logic
 
 - **Attempts**: 3 total (initial + 2 retries)
 - **Delay**: 500ms between retries
 - **Failure Handling**: Mark node as `Unknown` after all attempts exhausted; continue scanning remaining nodes
 
-### 3.3 Adaptive Rate Limiting
+### 4.3 Adaptive Rate Limiting
 
 - **Initial Behavior**: Start with unlimited concurrency
 - **Back-off Trigger**: Increase in connection failure rate
 - **Back-off Strategy**: Reduce concurrent connections progressively
 - **Recovery**: Gradual ramp-up; double concurrency every successful interval until restored to maximum; reset to reduced state on new failures
 
-### 3.4 Role Detection
+### 4.4 Role Detection
 
 - **Method**: `SELECT pg_is_in_recovery()`
 - **Primary**: Not in recovery → execute primary health check
 - **Replica**: In recovery → execute replica health check
 
-### 3.5 Health Check Queries
+### 4.5 Health Check Queries
 
 #### Primary Health Check Returns:
 - Timeline ID
@@ -94,7 +266,7 @@ Node Discovery → Parallel Scanning → Cluster Aggregation → Analysis → Pl
 - Recovery conflicts by database
 - Configuration (hot_standby, primary_conninfo)
 
-### 3.6 Inferring Unreachable Node State
+### 4.6 Inferring Unreachable Node State
 
 When a node is unreachable but the primary is accessible:
 
@@ -106,9 +278,9 @@ When a node is unreachable but the primary is accessible:
 
 ---
 
-## 4. Cluster Aggregation
+## 5. Cluster Aggregation
 
-### 4.1 Topology Profiles
+### 5.1 Topology Profiles
 
 Clusters are assigned to topology profiles that define expected characteristics:
 
@@ -119,7 +291,7 @@ Clusters are assigned to topology profiles that define expected characteristics:
   - `reporting-2node`: 1 primary + 1 replica
   - `legacy-5node`: Extended replication for legacy applications
 
-### 4.2 Unexpected Topology Handling
+### 5.2 Unexpected Topology Handling
 
 - **Do not silently skip**: Clusters with node counts not matching their profile
 - **Dedicated output section**: List all topology anomalies with:
@@ -128,7 +300,7 @@ Clusters are assigned to topology profiles that define expected characteristics:
   - Actual node count
   - List of nodes found
 
-### 4.3 Configuration Validation
+### 5.3 Configuration Validation
 
 - **synchronous_standby_names validation**: Verify configuration matches actual connected replicas
 - **Pattern support**: Configurable patterns in topology config to support:
@@ -139,9 +311,9 @@ Clusters are assigned to topology profiles that define expected characteristics:
 
 ---
 
-## 5. Health Classification
+## 6. Health Classification
 
-### 5.1 Health States
+### 6.1 Health States
 
 ```rust
 enum ClusterHealth {
@@ -152,7 +324,7 @@ enum ClusterHealth {
 }
 ```
 
-### 5.2 Classification Logic
+### 6.2 Classification Logic
 
 #### Healthy
 - Exactly 1 primary matching expected role
@@ -180,7 +352,7 @@ enum ClusterHealth {
 - `NoNodesReachable`: Cannot connect to any nodes
 - `UnexpectedTopology`: Node count doesn't match profile expectation
 
-### 5.3 Compound Severity Escalation
+### 6.3 Compound Severity Escalation
 
 When multiple degraded conditions exist simultaneously:
 
@@ -188,7 +360,7 @@ When multiple degraded conditions exist simultaneously:
 - **Rationale**: Compound failures represent higher risk than single issues
 - **Example**: OneReplicaDown + HighReplicationLag on remaining replica = Critical
 
-### 5.4 Dynamic Lag Threshold
+### 6.4 Dynamic Lag Threshold
 
 **Data Source**: Prometheus integration (pg_stat_replication metrics history)
 
@@ -201,7 +373,7 @@ When multiple degraded conditions exist simultaneously:
 
 **Caching**: 30-60 second TTL on Prometheus queries to avoid excessive load during watch mode
 
-### 5.5 Lag Diagnostic Heuristics
+### 6.5 Lag Diagnostic Heuristics
 
 When lag exceeds threshold, provide breakdown:
 
@@ -215,13 +387,13 @@ When lag exceeds threshold, provide breakdown:
 
 ---
 
-## 6. Split-Brain Analysis
+## 7. Split-Brain Analysis
 
-### 6.1 Detection
+### 7.1 Detection
 
 Multiple nodes return `pg_is_in_recovery() = false`
 
-### 6.2 Resolution Strategies
+### 7.2 Resolution Strategies
 
 1. **HigherTimeline**: Different timeline IDs → higher timeline is true primary
 2. **ReplicaFollowing**: Equal timelines → determine which primary replicas are streaming from
@@ -229,7 +401,7 @@ Multiple nodes return `pg_is_in_recovery() = false`
 4. **ReplicaOverridesTimeline**: Replicas follow lower-timeline primary
 5. **Indeterminate**: Cannot determine (equal timelines, no replica evidence)
 
-### 6.3 Timeline Relationship Analysis
+### 7.3 Timeline Relationship Analysis
 
 When replica follows lower timeline on same timeline:
 - Higher timeline primary can be safely shut down and marked for rebuild
@@ -239,7 +411,7 @@ When replica follows lower timeline with higher timeline itself:
 - Manual decision required
 - Tool should present both options with implications
 
-### 6.4 Recommended Actions with Approval
+### 7.4 Recommended Actions with Approval
 
 - **Default (interactive)**: Display recommended action, prompt operator for confirmation
 - **Script mode (--generate-script)**: Write remediation commands to script file for review and manual execution
@@ -247,15 +419,15 @@ When replica follows lower timeline with higher timeline itself:
 
 ---
 
-## 7. Plugin System
+## 8. Plugin System
 
-### 7.1 Architecture
+### 8.1 Architecture
 
 - **Communication**: External processes via stdin/stdout JSON
 - **Discovery**: Plugins specified in configuration file
 - **Language Agnostic**: Plugins can be written in any language
 
-### 7.2 Data Contract
+### 8.2 Data Contract
 
 - **Input**: Full `ClusterHealth` struct as JSON (maximum flexibility)
 - **Output**: JSON response containing:
@@ -263,14 +435,14 @@ When replica follows lower timeline with higher timeline itself:
   - Optional suggestions/annotations
   - Optional recommended actions
 
-### 7.3 Override Capability
+### 8.3 Override Capability
 
 Plugins can reclassify health states:
 - Must provide justification string
 - Original classification preserved alongside override
 - Use case: Maintenance windows, known acceptable states
 
-### 7.4 Execution Model
+### 8.4 Execution Model
 
 - **Timeout**: None (trust plugins to behave)
 - **Failure Handling**: Operator responsibility to fix misbehaving plugins
@@ -278,52 +450,155 @@ Plugins can reclassify health states:
 
 ---
 
-## 8. Watch Mode
+## 9. Operating Modes
 
-### 8.1 Activation
+### 9.1 CLI Mode (Default)
+
+Single scan, exit with results.
+
+```bash
+db-scan --cluster prod-pg-app007
+```
+
+- Fetches data sources once
+- Runs scan pipeline
+- Outputs to terminal/CSV
+- Exits
+
+### 9.2 Watch Mode
+
+Repeated scans with terminal UI.
 
 ```bash
 db-scan --watch 30s
 ```
 
-### 8.2 Features
+- Polls data sources before each scan
+- Tracks state transitions in memory
+- Terminal UI shows current state + recent transitions
+- No HTTP server
+- Ctrl+C to exit
 
-- **Efficient delta detection**: Track state changes between scans
-- **Certificate hot-reload**: Automatically reload TLS certificates on file change
-- **Background cache refresh**: Portal API cache refreshed periodically to detect infrastructure changes
-
-### 8.3 Transition Visualization
-
+**Transition Visualization**:
 - **Changed clusters highlighted**: Visual distinction for clusters that changed state since last scan
 - **Event log**: Chronological log of state transitions alongside current state table
   - Format: `[14:32:15] prod-pg-app007: Healthy → Degraded (OneReplicaDown)`
 
-### 8.4 Metrics Exposition
+### 9.3 Service Mode
 
-- **Endpoint**: `/metrics` (Prometheus format) when running in watch mode
-- **Metrics Include**:
-  - Scan duration per cluster
-  - Connection success/failure counts
-  - Cache hit rates
-  - Cluster health state gauges
+Long-running daemon with HTTP API.
+
+```bash
+db-scan --service --port 8080
+```
+
+**Lifecycle**:
+1. Start HTTP server
+2. Start background data source fetchers
+3. Wait for first successful data source fetch (with timeout)
+4. Begin periodic scan loop (configurable interval, default 30s)
+5. Serve requests until SIGTERM
+
+**HTTP Endpoints**:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Liveness probe (200 if running) |
+| `/ready` | GET | Readiness probe (200 if data sources healthy) |
+| `/metrics` | GET | Prometheus metrics |
+| `/scan` | POST | Trigger immediate scan (returns scan ID) |
+| `/scan/{id}` | GET | Get scan result by ID |
+| `/clusters` | GET | Current state of all clusters |
+| `/clusters/{name}` | GET | Detailed state for one cluster |
+| `/events` | GET | SSE stream of state transitions |
+| `/sources` | GET | Data source health status |
+
+### 9.4 Scan Triggering
+
+**Periodic**: Runs on configured interval (default 30s)
+
+**On-demand**: `POST /scan` triggers immediate scan
+- Returns scan ID immediately
+- Client polls `/scan/{id}` for result
+- Concurrent on-demand requests are coalesced (return same scan ID)
+
+**Rate limiting**: Minimum 5s between scans to prevent abuse
+
+### 9.5 Graceful Shutdown
+
+On SIGTERM:
+1. Stop accepting new HTTP requests
+2. Cancel any in-progress scan
+3. Flush pending metrics
+4. Exit within 10s timeout
 
 ---
 
-## 9. Output
+## 10. Metrics Exposition
 
-### 9.1 Terminal Output
+### 10.1 Prometheus Metrics
+
+All metrics prefixed with `dbscan_`.
+
+**Cluster Health**:
+```
+dbscan_cluster_health_state{cluster="prod-pg-app007", state="healthy"} 1
+dbscan_cluster_health_state{cluster="prod-pg-app007", state="degraded"} 0
+dbscan_cluster_health_state{cluster="prod-pg-app007", state="critical"} 0
+dbscan_cluster_health_state{cluster="prod-pg-app007", state="unknown"} 0
+
+dbscan_cluster_state_duration_seconds{cluster="prod-pg-app007"} 3600
+dbscan_cluster_failover{cluster="prod-pg-app007"} 0
+dbscan_cluster_replication_lag_bytes{cluster="prod-pg-app007", replica="db002"} 1048576
+```
+
+**Data Sources**:
+```
+dbscan_datasource_healthy{source="portal"} 1
+dbscan_datasource_healthy{source="prometheus"} 0
+dbscan_datasource_last_success_seconds{source="portal"} 45
+dbscan_datasource_last_success_seconds{source="prometheus"} 120
+dbscan_datasource_consecutive_failures{source="prometheus"} 3
+```
+
+**Scan Performance**:
+```
+dbscan_scan_duration_seconds{} 2.5
+dbscan_scan_nodes_total{} 150
+dbscan_scan_nodes_reachable{} 148
+dbscan_scan_clusters_total{} 50
+```
+
+**State Transitions**:
+```
+dbscan_state_transitions_total{cluster="prod-pg-app007", from="healthy", to="degraded"} 2
+```
+
+### 10.2 Metric Labels
+
+Consistent labeling:
+- `cluster`: Cluster name (e.g., "prod-pg-app007")
+- `source`: Data source name (e.g., "portal", "prometheus")
+- `state`: Health state (e.g., "healthy", "degraded", "critical", "unknown")
+- `replica`: Replica node name when applicable
+
+---
+
+## 11. Output
+
+### 11.1 Terminal Output
 
 - **Table format**: Cluster name, health state, primary node, replica states, lag
 - **Color coding**: Green (Healthy), Yellow (Degraded), Red (Critical), Gray (Unknown)
 - **Failover annotation**: Healthy clusters with failover show "Healthy (Failover)" in green
 - **Per-cluster timing**: Show scan duration for each cluster
 
-### 9.2 CSV Output
+### 11.2 CSV Output
 
 - **Content**: Full details including all health metrics, configuration values, split-brain resolution methods
 - **Stateless**: Each run produces independent snapshot; no historical accumulation
 
-### 9.3 Filtering
+### 11.3 Filtering
 
 - **--quiet**: Only output non-Healthy clusters (Degraded/Critical/Unknown)
 - **--show-healthy**: Include healthy clusters (default: true)
@@ -331,9 +606,35 @@ db-scan --watch 30s
 
 ---
 
-## 10. Configuration
+## 12. Configuration
 
-### 10.1 Topology Configuration (YAML)
+### 12.1 Service Configuration
+
+```yaml
+# config.yaml
+service:
+  port: 8080
+  scan_interval: 30s
+  min_scan_interval: 5s  # Rate limit for on-demand scans
+
+data_sources:
+  portal:
+    url: "https://database.example.com/api/v1/nodes"
+    refresh_interval: 5m
+    timeout: 30s
+
+  prometheus:
+    url: "https://prometheus.example.com"
+    refresh_interval: 60s
+    timeout: 10s
+    lag_threshold:
+      lookback: 7d
+      percentile: 95
+      tolerance_seconds: 5
+      static_fallback_bytes: 83886080  # 80MB
+```
+
+### 12.2 Topology Configuration (YAML)
 
 ```yaml
 # topology.yaml
@@ -357,75 +658,103 @@ overrides:
     profile: reporting-2node
 ```
 
-### 10.2 Configuration Loading
+### 12.3 Configuration Reloading
 
-- **Loaded once at startup**: Changes require restart
-- **Rationale**: Predictable behavior; operators know when config takes effect
+**Service mode**:
+- SIGHUP triggers config reload
+- Only safe settings reloaded (intervals, thresholds)
+- Structural changes (port, data source URLs) require restart
+- Reload status exposed at `/config/reload` endpoint
+
+**CLI/Watch mode**:
+- Config loaded once at startup
+- Changes require restart
 
 ---
 
-## 11. PostgreSQL Version Handling
+## 13. PostgreSQL Version Handling
 
-### 11.1 Version Mismatch Detection
+### 13.1 Version Mismatch Detection
 
 - **Flag as Degraded warning**: When nodes in same cluster report different major versions
 - **Use case**: During rolling upgrades this is expected; otherwise indicates issues
 - **Display**: Include version information in output for mismatched clusters
 
-### 11.2 Query Compatibility
+### 13.2 Query Compatibility
 
 - Health check queries should work across supported PostgreSQL versions
 - No version-specific query variants in initial implementation
 
 ---
 
-## 12. Error Handling
+## 14. Error Handling
 
-### 12.1 Connection Failures
+### 14.1 Connection Failures
 
 - Retry with backoff
 - Mark node as Unknown after exhausted retries
 - Continue with remaining nodes
 - Infer state from primary when possible
 
-### 12.2 Query Failures
+### 14.2 Query Failures
 
 - Mark node with appropriate Unknown variant (UnknownPrimary, UnknownReplica)
 - Log error details at debug level
 - Include error summary in output
 
-### 12.3 External Service Failures
+### 14.3 Data Source Failures
 
-| Service | Failure Behavior |
-|---------|------------------|
-| Database Portal | Use stale cache with warning |
-| Prometheus | Fall back to static thresholds |
-| Plugin | Skip plugin output, log warning |
+| Source | Failure Behavior | Escalation |
+|--------|------------------|------------|
+| Database Portal | Use cached nodes, mark Degraded | After 1h: WARN → ERROR log level |
+| Prometheus | Use cached/static thresholds | After 5m: WARN → ERROR log level |
+| Plugin | Skip plugin output, log warning | N/A |
+
+### 14.4 Service Health Degradation
+
+The `/ready` endpoint reflects overall health:
+
+```
+200 OK        - All data sources healthy, recent scan succeeded
+503 Degraded  - One or more data sources unhealthy, or last scan failed
+```
+
+Response body includes details:
+```json
+{
+  "ready": false,
+  "checks": {
+    "portal": { "healthy": true, "last_success_ago": "45s" },
+    "prometheus": { "healthy": false, "consecutive_failures": 3 },
+    "last_scan": { "healthy": true, "ago": "12s" }
+  }
+}
+```
 
 ---
 
-## 13. Security Considerations
+## 15. Security Considerations
 
-### 13.1 Credential Handling
+### 15.1 Credential Handling
 
 - PostgreSQL credentials via environment variables (PGUSER, PGPASSWORD)
 - Certificate paths via environment variables (PGSSLKEY, PGSSLCERT, PGSSLROOTCERT)
 - No credentials stored in configuration files
 
-### 13.2 Connection Security
+### 15.2 Connection Security
 
 - mTLS required for production environments
 - Certificate validation enabled
 - No fallback to unencrypted connections
 
-### 13.3 Output Sanitization
+### 15.3 Output Sanitization
 
 - Connection strings containing credentials must be redacted in logs and output
 - Plugin JSON output should not include raw credentials
 
 ---
 
-## 14. Performance Characteristics
+## 16. Performance Characteristics
 
 | Operation | Expected Performance |
 |-----------|---------------------|
@@ -437,15 +766,15 @@ overrides:
 
 ---
 
-## 15. Future Considerations
+## 17. Future Considerations
 
-### 15.1 Alert Integration (Planned)
+### 17.1 Alert Integration (Planned)
 
 - Export health states to monitoring systems
 - Webhook support for state change notifications
 - Integration with PagerDuty/Slack/etc.
 
-### 15.2 Generalization Path
+### 17.2 Generalization Path
 
 - Topology configuration enables non-Fortnox deployments
 - Core logic remains general; conventions are configuration
@@ -462,11 +791,13 @@ Options:
   -c, --cluster <PATTERN>     Filter clusters by name (substring match)
   -l, --log-level <LEVEL>     Log level [default: info]
   -w, --watch <INTERVAL>      Enable watch mode with specified interval (e.g., "30s")
+  -s, --service               Run as long-running service with HTTP API
+  -p, --port <PORT>           HTTP server port for service mode [default: 8080]
   -q, --quiet                 Only show non-Healthy clusters
       --show-healthy          Include healthy clusters in output [default: true]
       --show-failover         Highlight failed-over healthy clusters
       --generate-script       Output remediation as script instead of interactive prompts
-      --config <PATH>         Path to topology configuration file
+      --config <PATH>         Path to configuration file
   -h, --help                  Print help
   -V, --version              Print version
 
@@ -570,8 +901,30 @@ Environment Variables:
 
 ---
 
+## Appendix D: Open Questions
+
+1. **Authentication for HTTP endpoints?**
+   - Internal network only?
+   - mTLS?
+   - Bearer token?
+
+2. **Retention for `/scan/{id}` results?**
+   - Keep last N scans?
+   - TTL-based expiry?
+
+3. **SSE vs WebSocket for `/events`?**
+   - SSE simpler, sufficient for one-way events
+   - WebSocket if we want bidirectional (e.g., subscribe to specific clusters)
+
+4. **Should watch mode use the same HTTP server internally?**
+   - Could simplify code (watch mode = service mode without external listener)
+   - Or keep them separate for simplicity
+
+---
+
 ## Revision History
 
 | Version | Date       | Author         | Changes |
 |---------|------------|----------------|---------|
 | 1.0     | 2026-01-20 | Robert Sjöblom | Initial specification based on requirements interview |
+| 2.0     | 2026-01-20 | Robert Sjöblom | Added service mode, data source management, state tracking, metrics exposition |
