@@ -122,10 +122,16 @@ impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
     /// when the pipeline completes. Returns a `RunnablePipeline` that can be executed.
     pub fn sink<R, F, Fut>(self, f: F) -> RunnablePipeline<R>
     where
+        R: Send + 'static,
         F: FnOnce(&Ctx, UnboundedReceiver<In>) -> Fut,
         Fut: Future<Output = R> + Send + 'static,
     {
-        todo!()
+        let fut = f(&self.context, self.state.receiver);
+        let handle = spawn(fut);
+        RunnablePipeline {
+            handles: self.handles,
+            sink_handle: handle,
+        }
     }
 }
 
