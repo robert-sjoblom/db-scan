@@ -105,7 +105,15 @@ impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
         F: FnOnce(&Ctx, UnboundedReceiver<In>, UnboundedSender<Out>) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        todo!()
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let fut = f(&self.context, self.state.receiver, tx);
+        let mut handles = self.handles;
+        handles.push(spawn(fut));
+        Pipeline {
+            context: self.context,
+            handles,
+            state: HasSource { receiver: rx },
+        }
     }
 
     /// Add a terminal sink that consumes items and produces a final result.
