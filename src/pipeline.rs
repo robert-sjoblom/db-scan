@@ -30,15 +30,31 @@
 //!     .await;
 //! ```
 
-use std::marker::PhantomData;
-
+use error_stack::{FutureExt, Report, ResultExt};
+use futures::future::join_all;
 use tokio::{
     spawn,
     sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
 
-use crate::timings::Event;
+use crate::timings::{Event, Stage};
+
+/// Error type for task failures within a [`Pipeline`].
+///
+/// Captures which pipeline stage failed for better error context.
+#[derive(Debug)]
+pub struct PipelineError {
+    pub stage: Stage,
+}
+
+impl std::fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Task '{}' failed", self.stage)
+    }
+}
+
+impl core::error::Error for PipelineError {}
 
 /// Shared context available to all pipeline stages.
 struct PipelineContext {
@@ -58,9 +74,9 @@ struct HasSource<T> {
 /// The `State` type parameter tracks what stage the pipeline is in:
 /// - `Empty`: no source added yet
 /// - `HasSource<T>`: has a source producing `T`, ready for stages or sink
-struct Pipeline<Ctx, State> {
+pub struct Pipeline<Ctx, State> {
     context: Ctx,
-    handles: Vec<JoinHandle<()>>,
+    handles: Vec<(Stage, JoinHandle<()>)>,
     state: State,
 }
 
@@ -78,7 +94,7 @@ impl<Ctx> Pipeline<Ctx, Empty> {
     ///
     /// The source receives a sender and should send items into the pipeline.
     /// This transitions the pipeline from `Empty` to `HasSource<Out>`.
-    pub fn source<Out, F, Fut>(self, f: F) -> Pipeline<Ctx, HasSource<Out>>
+    pub fn source<Out, F, Fut>(self, stage: Stage, f: F) -> Pipeline<Ctx, HasSource<Out>>
     where
         F: FnOnce(&Ctx, UnboundedSender<Out>) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
@@ -86,7 +102,7 @@ impl<Ctx> Pipeline<Ctx, Empty> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let fut = f(&self.context, tx);
         let mut handles = self.handles;
-        handles.push(spawn(fut));
+        handles.push((stage, spawn(fut)));
         Pipeline {
             context: self.context,
             handles,
@@ -100,7 +116,7 @@ impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
     ///
     /// The stage receives items from the previous stage and sends transformed
     /// items to the next stage. This transitions from `HasSource<In>` to `HasSource<Out>`.
-    pub fn stage<Out, F, Fut>(self, f: F) -> Pipeline<Ctx, HasSource<Out>>
+    pub fn stage<Out, F, Fut>(self, stage: Stage, f: F) -> Pipeline<Ctx, HasSource<Out>>
     where
         F: FnOnce(&Ctx, UnboundedReceiver<In>, UnboundedSender<Out>) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
@@ -108,7 +124,7 @@ impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let fut = f(&self.context, self.state.receiver, tx);
         let mut handles = self.handles;
-        handles.push(spawn(fut));
+        handles.push((stage, spawn(fut)));
         Pipeline {
             context: self.context,
             handles,
@@ -120,7 +136,7 @@ impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
     ///
     /// The sink receives items from the previous stage and returns a value
     /// when the pipeline completes. Returns a `RunnablePipeline` that can be executed.
-    pub fn sink<R, F, Fut>(self, f: F) -> RunnablePipeline<R>
+    pub fn sink<R, F, Fut>(self, stage: Stage, f: F) -> RunnablePipeline<R>
     where
         R: Send + 'static,
         F: FnOnce(&Ctx, UnboundedReceiver<In>) -> Fut,
@@ -130,7 +146,7 @@ impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
         let handle = spawn(fut);
         RunnablePipeline {
             handles: self.handles,
-            sink_handle: handle,
+            sink_handle: (stage, handle),
         }
     }
 }
@@ -140,16 +156,32 @@ impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
 /// Created by calling `sink()` on a pipeline. Call `run()` to execute
 /// all stages concurrently and get the sink's result.
 struct RunnablePipeline<R> {
-    handles: Vec<JoinHandle<()>>,
-    sink_handle: JoinHandle<R>,
+    handles: Vec<(Stage, JoinHandle<()>)>,
+    sink_handle: (Stage, JoinHandle<R>),
 }
 
 impl<R> RunnablePipeline<R> {
     /// Execute the pipeline, waiting for all stages to complete.
     ///
     /// Returns the result produced by the sink.
-    pub async fn run(self) -> R {
-        todo!()
+    pub async fn run(self) -> Result<R, Report<PipelineError>> {
+        let void_futures = self.handles.into_iter().map(|(stage, handle)| async move {
+            handle.await.change_context(PipelineError { stage })?;
+            Ok::<_, Report<PipelineError>>(())
+        });
+
+        let (void_results, result) = futures::future::join(
+            join_all(void_futures),
+            self.sink_handle.1.change_context(PipelineError {
+                stage: self.sink_handle.0,
+            }),
+        )
+        .await;
+        for result in void_results {
+            result?;
+        }
+
+        result
     }
 }
 
@@ -167,16 +199,16 @@ mod tests {
         let ctx = PipelineContext { timings_tx };
 
         let result = Pipeline::new(ctx)
-            .source(|_ctx, tx| async move {
+            .source(Stage::DatabasePortal, |_ctx, tx| async move {
                 tx.send("hello").ok();
                 tx.send("world").ok();
             })
-            .stage(|_ctx, mut rx, tx| async move {
+            .stage(Stage::Scan, |_ctx, mut rx, tx| async move {
                 while let Some(s) = rx.recv().await {
                     tx.send(s.len()).ok();
                 }
             })
-            .sink(|_ctx, mut rx| async move {
+            .sink(Stage::Analyze, |_ctx, mut rx| async move {
                 let mut results = vec![];
                 while let Some(n) = rx.recv().await {
                     results.push(n);
@@ -184,7 +216,8 @@ mod tests {
                 results
             })
             .run()
-            .await;
+            .await
+            .expect("pipeline should complete successfully");
 
         assert_eq!(result, vec![5, 5]);
     }
