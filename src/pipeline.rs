@@ -1,6 +1,39 @@
+//! Type-safe pipeline for async stage composition.
+//!
+//! Uses the typestate pattern to enforce valid pipeline construction at compile time:
+//! - Pipelines must start with a `source`
+//! - Stages can only be added after a source
+//! - The output type of each stage must match the input type of the next
+//! - Pipelines must end with a `sink` to be runnable
+//!
+//! # Example
+//!
+//! ```ignore
+//! let result = Pipeline::new(ctx)
+//!     .source(|ctx, tx| async move {
+//!         tx.send("hello").ok();
+//!         tx.send("world").ok();
+//!     })
+//!     .stage(|ctx, rx, tx| async move {
+//!         while let Some(s) = rx.recv().await {
+//!             tx.send(s.len()).ok();
+//!         }
+//!     })
+//!     .sink(|ctx, rx| async move {
+//!         let mut results = vec![];
+//!         while let Some(n) = rx.recv().await {
+//!             results.push(n);
+//!         }
+//!         results
+//!     })
+//!     .run()
+//!     .await;
+//! ```
+
 use std::marker::PhantomData;
 
 use tokio::{
+    spawn,
     sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
@@ -16,7 +49,9 @@ struct PipelineContext {
 struct Empty;
 
 /// Typestate marker: pipeline has a source producing items of type `T`.
-struct HasSource<T>(PhantomData<T>);
+struct HasSource<T> {
+    receiver: UnboundedReceiver<T>,
+}
 
 /// A pipeline under construction.
 ///
@@ -26,7 +61,7 @@ struct HasSource<T>(PhantomData<T>);
 struct Pipeline<Ctx, State> {
     context: Ctx,
     handles: Vec<JoinHandle<()>>,
-    _state: PhantomData<State>,
+    state: State,
 }
 
 impl<Ctx> Pipeline<Ctx, Empty> {
@@ -35,7 +70,7 @@ impl<Ctx> Pipeline<Ctx, Empty> {
         Pipeline {
             context,
             handles: Vec::new(),
-            _state: PhantomData,
+            state: Empty,
         }
     }
 
@@ -48,6 +83,15 @@ impl<Ctx> Pipeline<Ctx, Empty> {
         F: FnOnce(&Ctx, UnboundedSender<Out>) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let fut = f(&self.context, tx);
+        let mut handles = self.handles;
+        handles.push(spawn(fut));
+        Pipeline {
+            context: self.context,
+            handles,
+            state: HasSource { receiver: rx },
+        }
     }
 }
 
@@ -99,14 +143,7 @@ impl<R> RunnablePipeline<R> {
 mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
-    use crate::{
-        timings::Event,
-        v2::{
-            analyze::AnalyzedCluster,
-            cluster::{Cluster, cluster_builder},
-            scan::{AnalyzedNode, scan_nodes},
-        },
-    };
+    use crate::timings::Event;
 
     use super::*;
 
