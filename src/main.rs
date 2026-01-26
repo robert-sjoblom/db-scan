@@ -48,8 +48,6 @@ async fn main() {
 
     let (timings_tx, timings_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
 
-    // TODO: we should move this to the task_group too
-    // Set up timings handle first, since others will send on the channel
     let timings_handle = tokio::spawn(timings::reporter(timings_rx));
     let batch_data = batch_filesystem_data(timings_tx.clone()).await;
     let pipeline_ctx = PipelineContext::new(timings_tx.clone(), batch_data, writer_options);
@@ -114,10 +112,6 @@ async fn batch_filesystem_data(
 }
 
 async fn filter_nodes(ctx: Arc<PipelineContext>, tx: UnboundedSender<Node>) {
-    ctx.timings_tx
-        .send(Event::Start(Stage::DatabasePortal))
-        .ok();
-
     let nodes = match database_portal::nodes().await {
         Ok(nodes) => nodes,
         Err(e) => {
@@ -139,6 +133,4 @@ async fn filter_nodes(ctx: Arc<PipelineContext>, tx: UnboundedSender<Node>) {
                 break;
             }
         }
-
-    ctx.timings_tx.send(Event::End(Stage::DatabasePortal)).ok();
 }

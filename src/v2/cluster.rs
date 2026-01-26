@@ -5,7 +5,6 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::{
     pipeline::PipelineContext,
-    timings::{Event, Stage},
     v2::scan::{AnalyzedNode, health_check_primary::ReplicationConnection},
 };
 
@@ -14,11 +13,10 @@ use crate::{
 ///
 /// If the channel closes, the function will exit gracefully after logging any incomplete clusters.
 pub async fn cluster_builder(
-    ctx: Arc<PipelineContext>,
+    _: Arc<PipelineContext>,
     mut node_rx: UnboundedReceiver<AnalyzedNode>,
     cluster_tx: UnboundedSender<Cluster>,
 ) {
-    ctx.timings_tx.send(Event::Start(Stage::Clustering)).ok();
     let mut nodes: HashMap<u32, Vec<AnalyzedNode>> = HashMap::new();
 
     while let Some(node) = node_rx.recv().await {
@@ -54,7 +52,6 @@ pub async fn cluster_builder(
     } else {
         tracing::info!("node channel closed, all clusters processed");
     }
-    ctx.timings_tx.send(Event::End(Stage::Clustering)).ok();
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
