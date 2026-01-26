@@ -1,18 +1,16 @@
-use std::{collections::HashMap, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use clap::Parser;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::instrument;
 
 use crate::{
     config::{CONFIG, get_config},
+    pipeline::{Pipeline, PipelineContext},
     prometheus::FileSystemMetrics,
-    task_group::TaskGroup,
     timings::{Event, Stage},
     v2::{
-        analyze::{ClusterHealth, analyze_clusters},
-        cluster::{Cluster, cluster_builder},
-        node::Node,
-        scan::{AnalyzedNode, scan_nodes},
+        analyze::analyze_clusters, cluster::cluster_builder, node::Node, scan::scan_nodes,
         writer::write_results,
     },
 };
@@ -22,7 +20,6 @@ mod database_portal;
 mod logging;
 mod pipeline;
 mod prometheus;
-mod task_group;
 mod timings;
 mod v2;
 
@@ -50,42 +47,27 @@ async fn main() {
     CONFIG.set(args).unwrap();
 
     let (timings_tx, timings_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
-    let (node_tx, node_rx) = tokio::sync::mpsc::unbounded_channel::<AnalyzedNode>();
-    let (cluster_tx, cluster_rx) = tokio::sync::mpsc::unbounded_channel::<Cluster>();
-    let (analyze_tx, analyze_rx) = tokio::sync::mpsc::unbounded_channel::<ClusterHealth>();
 
     // TODO: we should move this to the task_group too
     // Set up timings handle first, since others will send on the channel
     let timings_handle = tokio::spawn(timings::reporter(timings_rx));
+    let batch_data = batch_filesystem_data(timings_tx.clone()).await;
+    let pipeline_ctx = PipelineContext::new(timings_tx.clone(), batch_data, writer_options);
 
-    let mut tasks = TaskGroup::new();
-
-    timings_tx.send(Event::Start(Stage::Prometheus)).ok();
-    let batch_data = batch_filesystem_data().await;
-    timings_tx.send(Event::End(Stage::Prometheus)).ok();
-
-    tasks.spawn(
-        Stage::Clustering,
-        cluster_builder(node_rx, cluster_tx, timings_tx.clone()),
-    );
-
-    timings_tx.send(Event::Start(Stage::DatabasePortal)).ok();
-    let nodes = filter_nodes().await;
-    timings_tx.send(Event::End(Stage::DatabasePortal)).ok();
-
-    tasks.spawn(Stage::Scan, scan_nodes(node_tx, nodes, timings_tx.clone()));
-
-    tasks.spawn(
-        Stage::Analyze,
-        analyze_clusters(batch_data, cluster_rx, analyze_tx, timings_tx.clone()),
-    );
-
-    tasks.spawn_returning(
-        Stage::Write,
-        write_results(analyze_rx, writer_options, timings_tx.clone()),
-    );
-
-    let results = tasks.run().await;
+    let results = Pipeline::new(pipeline_ctx)
+        .source(Stage::DatabasePortal, |ctx, tx| {
+            filter_nodes(ctx.clone(), tx)
+        })
+        .stage(Stage::Scan, |ctx, rx, tx| scan_nodes(ctx.clone(), rx, tx))
+        .stage(Stage::Clustering, |ctx, rx, tx| {
+            cluster_builder(ctx.clone(), rx, tx)
+        })
+        .stage(Stage::Analyze, |ctx, rx, tx| {
+            analyze_clusters(ctx.clone(), rx, tx)
+        })
+        .sink(Stage::Write, |ctx, rx| write_results(ctx.clone(), rx))
+        .run()
+        .await;
 
     timings_tx.send(Event::Complete).ok();
     drop(timings_tx);
@@ -104,17 +86,19 @@ async fn main() {
     }
 
     match results {
-        Ok(v) => {
-            for (_, s) in v {
-                print!("{s}");
-            }
+        Ok(s) => {
+            print!("{s}");
         }
         Err(e) => tracing::error!(error = %e, "task failed"),
     }
 }
 
 #[instrument(level = "debug")]
-async fn batch_filesystem_data() -> HashMap<String, FileSystemMetrics> {
+async fn batch_filesystem_data(
+    timings_tx: UnboundedSender<Event>,
+) -> HashMap<String, FileSystemMetrics> {
+    timings_tx.send(Event::Start(Stage::Prometheus)).ok();
+
     let data = prometheus::client::get_batch_filesystem_data(get_config().cluster_pattern()).await;
 
     if data.is_empty() {
@@ -125,21 +109,36 @@ async fn batch_filesystem_data() -> HashMap<String, FileSystemMetrics> {
             "fetched prometheus filesystem metrics"
         );
     }
+    timings_tx.send(Event::End(Stage::Prometheus)).ok();
     data
 }
 
-// TODO! Fix this unwrap, it's not healthy
-async fn filter_nodes() -> impl Iterator<Item = Node> {
-    database_portal::nodes()
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|n| {
+async fn filter_nodes(ctx: Arc<PipelineContext>, tx: UnboundedSender<Node>) {
+    ctx.timings_tx
+        .send(Event::Start(Stage::DatabasePortal))
+        .ok();
+
+    let nodes = match database_portal::nodes().await {
+        Ok(nodes) => nodes,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch nodes from database portal");
+            ctx.timings_tx.send(Event::End(Stage::DatabasePortal)).ok();
+            return;
+        }
+    };
+
+    for node in nodes.into_iter().filter(|n| {
             if let Some(cluster) = &get_config().cluster {
                 n.cluster_name().contains(cluster)
             } else {
                 true
             }
-        })
-        .inspect(|n| tracing::trace!(node_id = n.id, node_name = %n.node_name, cluster_id = n.cluster_id, "fetched node"))
+        }).inspect(|n| tracing::trace!(node_id = n.id, node_name = %n.node_name, cluster_id = n.cluster_id, "fetched node")) {
+            if tx.send(node).is_err() {
+                tracing::warn!("receiver dropped, stopping node enumeration");
+                break;
+            }
+        }
+
+    ctx.timings_tx.send(Event::End(Stage::DatabasePortal)).ok();
 }

@@ -30,13 +30,13 @@
 //!     .await;
 //! ```
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use error_stack::{FutureExt, Report, ResultExt};
 use futures::future::join_all;
 use tokio::{
     spawn,
-    sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
 
@@ -51,6 +51,7 @@ use crate::{
 /// Captures which pipeline stage failed for better error context.
 #[derive(Debug)]
 pub struct PipelineError {
+    /// The pipeline stage that failed.
     pub stage: Stage,
 }
 
@@ -67,9 +68,12 @@ impl core::error::Error for PipelineError {}
 /// Provides access to shared resources (like timing event channels) that
 /// pipeline stages may need during execution.
 pub struct PipelineContext {
-    timings_tx: UnboundedSender<Event>,
-    batch_data: HashMap<String, FileSystemMetrics>,
-    writer_options: WriterOptions,
+    /// Channel sender for emitting timing events.
+    pub timings_tx: UnboundedSender<Event>,
+    /// Pre-loaded filesystem metrics keyed by cluster name.
+    pub batch_data: HashMap<String, FileSystemMetrics>,
+    /// Configuration options for the output writer.
+    pub writer_options: WriterOptions,
 }
 
 impl PipelineContext {
@@ -92,10 +96,10 @@ impl PipelineContext {
 }
 
 /// Typestate marker: pipeline has no source yet.
-struct Empty;
+pub struct Empty;
 
 /// Typestate marker: pipeline has a source producing items of type `T`.
-struct HasSource<T> {
+pub struct HasSource<T> {
     receiver: UnboundedReceiver<T>,
 }
 
@@ -105,7 +109,7 @@ struct HasSource<T> {
 /// - `Empty`: no source added yet
 /// - `HasSource<T>`: has a source producing `T`, ready for stages or sink
 pub struct Pipeline<Ctx, State> {
-    context: Ctx,
+    context: Arc<Ctx>,
     handles: Vec<(Stage, JoinHandle<()>)>,
     state: State,
 }
@@ -114,7 +118,7 @@ impl<Ctx> Pipeline<Ctx, Empty> {
     /// Create a new pipeline with the given context.
     pub fn new(context: Ctx) -> Self {
         Pipeline {
-            context,
+            context: context.into(),
             handles: Vec::new(),
             state: Empty,
         }
@@ -126,10 +130,13 @@ impl<Ctx> Pipeline<Ctx, Empty> {
     /// This transitions the pipeline from `Empty` to `HasSource<Out>`.
     pub fn source<Out, F, Fut>(self, stage: Stage, f: F) -> Pipeline<Ctx, HasSource<Out>>
     where
-        F: FnOnce(&Ctx, UnboundedSender<Out>) -> Fut,
+        F: FnOnce(&Arc<Ctx>, UnboundedSender<Out>) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // TODO: move ctx/timings here + stage + sink, remove manual calls in
+        // functions. requires trait bounds on &Ctx.
         let fut = f(&self.context, tx);
         let mut handles = self.handles;
         handles.push((stage, spawn(fut)));
@@ -148,7 +155,7 @@ impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
     /// items to the next stage. This transitions from `HasSource<In>` to `HasSource<Out>`.
     pub fn stage<Out, F, Fut>(self, stage: Stage, f: F) -> Pipeline<Ctx, HasSource<Out>>
     where
-        F: FnOnce(&Ctx, UnboundedReceiver<In>, UnboundedSender<Out>) -> Fut,
+        F: FnOnce(&Arc<Ctx>, UnboundedReceiver<In>, UnboundedSender<Out>) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -169,7 +176,7 @@ impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
     pub fn sink<R, F, Fut>(self, stage: Stage, f: F) -> RunnablePipeline<R>
     where
         R: Send + 'static,
-        F: FnOnce(&Ctx, UnboundedReceiver<In>) -> Fut,
+        F: FnOnce(&Arc<Ctx>, UnboundedReceiver<In>) -> Fut,
         Fut: Future<Output = R> + Send + 'static,
     {
         let fut = f(&self.context, self.state.receiver);
@@ -185,7 +192,7 @@ impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
 ///
 /// Created by calling `sink()` on a pipeline. Call `run()` to execute
 /// all stages concurrently and get the sink's result.
-struct RunnablePipeline<R> {
+pub struct RunnablePipeline<R> {
     handles: Vec<(Stage, JoinHandle<()>)>,
     sink_handle: (Stage, JoinHandle<R>),
 }

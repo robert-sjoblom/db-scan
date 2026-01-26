@@ -3,11 +3,13 @@ use std::{
     fs::File,
     io::{BufWriter, IsTerminal, Write},
     path::Path,
+    sync::Arc,
 };
 
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::{
+    pipeline::PipelineContext,
     timings::{Event, Stage},
     v2::{
         analyze::{AnalyzedCluster, ClusterHealth, Reason, SplitBrainInfo, SplitBrainResolution},
@@ -132,28 +134,29 @@ impl CsvWriter {
 /// Returns a formatted string for terminal display. The caller should print this
 /// after all other logging is complete.
 pub async fn write_results(
+    ctx: Arc<PipelineContext>,
     mut analyze_rx: UnboundedReceiver<ClusterHealth>,
-    options: WriterOptions,
-    timings_tx: UnboundedSender<Event>,
 ) -> String {
-    timings_tx.send(Event::Start(Stage::Write)).ok();
+    ctx.timings_tx.send(Event::Start(Stage::Write)).ok();
+
     let mut rows: Vec<OutputRow> = Vec::new();
 
     // Initialize CSV writer if path provided
-    let mut csv_writer = options
-        .csv_path
-        .as_ref()
-        .and_then(|path| match CsvWriter::new(path) {
-            Ok(w) => Some(w),
-            Err(e) => {
-                tracing::error!(path = %path, error = %e, "failed to create CSV file");
-                None
-            }
-        });
+    let mut csv_writer =
+        ctx.writer_options
+            .csv_path
+            .as_ref()
+            .and_then(|path| match CsvWriter::new(path) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    tracing::error!(path = %path, error = %e, "failed to create CSV file");
+                    None
+                }
+            });
 
     // Collect results, streaming to CSV as they arrive
     while let Some(health) = analyze_rx.recv().await {
-        if let Some(row) = extract_row(&health, &options) {
+        if let Some(row) = extract_row(&health, &ctx.writer_options) {
             // Write to CSV immediately
             if let Some(ref mut writer) = csv_writer
                 && let Err(e) = writer.write_row(&row)
@@ -168,7 +171,7 @@ pub async fn write_results(
     if let Some(ref mut writer) = csv_writer {
         if let Err(e) = writer.flush() {
             tracing::error!(error = %e, "failed to flush CSV");
-        } else if let Some(ref path) = options.csv_path {
+        } else if let Some(ref path) = ctx.writer_options.csv_path {
             tracing::info!(path = %path, "CSV written successfully");
         }
     }
@@ -176,8 +179,8 @@ pub async fn write_results(
     // Sort by severity (Healthy first, then Unknown, Degraded, Critical), then cluster alphabetically
     rows.sort();
 
-    let output = build_terminal_output(&rows, &options);
-    timings_tx.send(Event::End(Stage::Write)).ok();
+    let output = build_terminal_output(&rows, &ctx.writer_options);
+    ctx.timings_tx.send(Event::End(Stage::Write)).ok();
     output
 }
 
