@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::instrument;
 
 use crate::{
+    pipeline::PipelineContext,
     prometheus::FileSystemMetrics,
     timings::{Event, Stage},
     v2::{
@@ -39,26 +40,21 @@ type Ip = String;
 /// data asynchronously before performing synchronous health analysis.
 #[instrument(skip_all, level = "info")]
 pub async fn analyze_clusters(
-    batch_data: HashMap<Ip, FileSystemMetrics>,
+    ctx: Arc<PipelineContext>,
     mut cluster_rx: UnboundedReceiver<Cluster>,
     analyzed_tx: UnboundedSender<ClusterHealth>,
-    timings_tx: UnboundedSender<Event>,
 ) {
-    timings_tx.send(Event::Start(Stage::Analyze)).ok();
-    tracing::info!("cluster analysis task started");
+    ctx.timings_tx.send(Event::Start(Stage::Analyze)).ok();
+
     while let Some(cluster) = cluster_rx.recv().await {
-        let analyzed = analyze_with_enrichment(cluster, &batch_data);
+        let analyzed = analyze_with_enrichment(cluster, &ctx.batch_data);
 
         match analyzed_tx.send(analyzed) {
             Ok(_) => tracing::trace!("sent analyzed cluster"),
             Err(e) => tracing::error!(error = %e, "failed to send analyzed cluster"),
         }
     }
-
-    if cluster_rx.is_closed() {
-        tracing::info!("cluster channel closed, analysis task exiting");
-    }
-    timings_tx.send(Event::End(Stage::Analyze)).ok();
+    ctx.timings_tx.send(Event::End(Stage::Analyze)).ok();
 }
 
 /// Calculates backup progress before analyzing the cluster, allowing us to

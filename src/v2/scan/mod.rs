@@ -1,11 +1,12 @@
 use std::{net::Ipv4Addr, sync::Arc};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_postgres::Client;
 use tracing::instrument;
 
 use crate::{
+    pipeline::PipelineContext,
     timings::{Event, Stage},
     v2::{
         db::{self, DbError},
@@ -19,19 +20,18 @@ pub mod health_check_replica;
 
 #[instrument(skip_all, level = "info")]
 pub async fn scan_nodes(
+    ctx: Arc<PipelineContext>,
+    mut rx: UnboundedReceiver<Node>,
     tx: UnboundedSender<AnalyzedNode>,
-    nodes: impl Iterator<Item = Node>,
-    timings_tx: UnboundedSender<Event>,
 ) {
-    timings_tx.send(Event::Start(Stage::Scan)).ok();
-    let handles = nodes.into_iter().map(|node| {
+    ctx.timings_tx.send(Event::Start(Stage::Scan)).ok();
+    let mut handles = Vec::new();
+    while let Some(node) = rx.recv().await {
         let tx = tx.clone();
-        tokio::spawn(async move { scan(node, tx).await })
-    });
+        handles.push(tokio::spawn(async move { scan(node, tx).await }))
+    }
     futures::future::join_all(handles).await;
-
-    tracing::info!("node scanning completed");
-    timings_tx.send(Event::End(Stage::Scan)).ok();
+    ctx.timings_tx.send(Event::End(Stage::Scan)).ok();
 }
 
 #[instrument(skip(tx), level = "debug", fields(node_name = %node.node_name, node_id = node.id))]
