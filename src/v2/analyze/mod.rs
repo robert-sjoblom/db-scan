@@ -6,7 +6,6 @@ use tracing::instrument;
 use crate::{
     pipeline::PipelineContext,
     prometheus::FileSystemMetrics,
-    timings::{Event, Stage},
     v2::{
         cluster::Cluster,
         scan::{AnalyzedNode, Role},
@@ -44,8 +43,6 @@ pub async fn analyze_clusters(
     mut cluster_rx: UnboundedReceiver<Cluster>,
     analyzed_tx: UnboundedSender<ClusterHealth>,
 ) {
-    ctx.timings_tx.send(Event::Start(Stage::Analyze)).ok();
-
     while let Some(cluster) = cluster_rx.recv().await {
         let analyzed = analyze_with_enrichment(cluster, &ctx.batch_data);
 
@@ -54,7 +51,6 @@ pub async fn analyze_clusters(
             Err(e) => tracing::error!(error = %e, "failed to send analyzed cluster"),
         }
     }
-    ctx.timings_tx.send(Event::End(Stage::Analyze)).ok();
 }
 
 /// Calculates backup progress before analyzing the cluster, allowing us to

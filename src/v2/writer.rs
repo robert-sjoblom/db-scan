@@ -10,7 +10,6 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::{
     pipeline::PipelineContext,
-    timings::{Event, Stage},
     v2::{
         analyze::{AnalyzedCluster, ClusterHealth, Reason, SplitBrainInfo, SplitBrainResolution},
         scan::health_check_primary::ReplicationConnection,
@@ -137,8 +136,6 @@ pub async fn write_results(
     ctx: Arc<PipelineContext>,
     mut analyze_rx: UnboundedReceiver<ClusterHealth>,
 ) -> String {
-    ctx.timings_tx.send(Event::Start(Stage::Write)).ok();
-
     let mut rows: Vec<OutputRow> = Vec::new();
 
     // Initialize CSV writer if path provided
@@ -179,9 +176,7 @@ pub async fn write_results(
     // Sort by severity (Healthy first, then Unknown, Degraded, Critical), then cluster alphabetically
     rows.sort();
 
-    let output = build_terminal_output(&rows, &ctx.writer_options);
-    ctx.timings_tx.send(Event::End(Stage::Write)).ok();
-    output
+    build_terminal_output(&rows, &ctx.writer_options)
 }
 
 /// Extract an OutputRow from ClusterHealth, returning None if it should be filtered out

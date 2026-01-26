@@ -7,7 +7,6 @@ use tracing::instrument;
 
 use crate::{
     pipeline::PipelineContext,
-    timings::{Event, Stage},
     v2::{
         db::{self, DbError},
         node::Node,
@@ -20,18 +19,16 @@ pub mod health_check_replica;
 
 #[instrument(skip_all, level = "info")]
 pub async fn scan_nodes(
-    ctx: Arc<PipelineContext>,
+    _: Arc<PipelineContext>,
     mut rx: UnboundedReceiver<Node>,
     tx: UnboundedSender<AnalyzedNode>,
 ) {
-    ctx.timings_tx.send(Event::Start(Stage::Scan)).ok();
     let mut handles = Vec::new();
     while let Some(node) = rx.recv().await {
         let tx = tx.clone();
         handles.push(tokio::spawn(async move { scan(node, tx).await }))
     }
     futures::future::join_all(handles).await;
-    ctx.timings_tx.send(Event::End(Stage::Scan)).ok();
 }
 
 #[instrument(skip(tx), level = "debug", fields(node_name = %node.node_name, node_id = node.id))]

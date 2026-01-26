@@ -63,6 +63,10 @@ impl std::fmt::Display for PipelineError {
 
 impl core::error::Error for PipelineError {}
 
+pub trait Timings {
+    fn timings(&self) -> &UnboundedSender<Event>;
+}
+
 /// Shared context available to all pipeline stages.
 ///
 /// Provides access to shared resources (like timing event channels) that
@@ -95,6 +99,12 @@ impl PipelineContext {
     }
 }
 
+impl Timings for PipelineContext {
+    fn timings(&self) -> &UnboundedSender<Event> {
+        &self.timings_tx
+    }
+}
+
 /// Typestate marker: pipeline has no source yet.
 pub struct Empty;
 
@@ -114,7 +124,7 @@ pub struct Pipeline<Ctx, State> {
     state: State,
 }
 
-impl<Ctx> Pipeline<Ctx, Empty> {
+impl<Ctx: Timings> Pipeline<Ctx, Empty> {
     /// Create a new pipeline with the given context.
     pub fn new(context: Ctx) -> Self {
         Pipeline {
@@ -130,14 +140,21 @@ impl<Ctx> Pipeline<Ctx, Empty> {
     /// This transitions the pipeline from `Empty` to `HasSource<Out>`.
     pub fn source<Out, F, Fut>(self, stage: Stage, f: F) -> Pipeline<Ctx, HasSource<Out>>
     where
-        F: FnOnce(&Arc<Ctx>, UnboundedSender<Out>) -> Fut,
+        Ctx: Send + Sync + 'static,
+        Out: Send + 'static,
+        F: FnOnce(Arc<Ctx>, UnboundedSender<Out>) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        // TODO: move ctx/timings here + stage + sink, remove manual calls in
-        // functions. requires trait bounds on &Ctx.
-        let fut = f(&self.context, tx);
+        let ctx = self.context.clone();
+        let fut = async move {
+            ctx.timings().send(Event::Start(stage)).ok();
+            let ctx_for_f = ctx.clone();
+            f(ctx_for_f, tx).await;
+            ctx.timings().send(Event::End(stage)).ok();
+        };
+
         let mut handles = self.handles;
         handles.push((stage, spawn(fut)));
         Pipeline {
@@ -148,18 +165,29 @@ impl<Ctx> Pipeline<Ctx, Empty> {
     }
 }
 
-impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
+impl<Ctx: Timings, In> Pipeline<Ctx, HasSource<In>> {
     /// Add a processing stage that transforms `In` items to `Out` items.
     ///
     /// The stage receives items from the previous stage and sends transformed
     /// items to the next stage. This transitions from `HasSource<In>` to `HasSource<Out>`.
     pub fn stage<Out, F, Fut>(self, stage: Stage, f: F) -> Pipeline<Ctx, HasSource<Out>>
     where
-        F: FnOnce(&Arc<Ctx>, UnboundedReceiver<In>, UnboundedSender<Out>) -> Fut,
+        Ctx: Send + Sync + 'static,
+        Out: Send + 'static,
+        In: Send + 'static,
+        F: FnOnce(Arc<Ctx>, UnboundedReceiver<In>, UnboundedSender<Out>) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let fut = f(&self.context, self.state.receiver, tx);
+
+        let ctx = self.context.clone();
+        let fut = async move {
+            ctx.timings().send(Event::Start(stage)).ok();
+            let ctx_for_f = ctx.clone();
+            f(ctx_for_f, self.state.receiver, tx).await;
+            ctx.timings().send(Event::End(stage)).ok();
+        };
+
         let mut handles = self.handles;
         handles.push((stage, spawn(fut)));
         Pipeline {
@@ -175,11 +203,21 @@ impl<Ctx, In> Pipeline<Ctx, HasSource<In>> {
     /// when the pipeline completes. Returns a `RunnablePipeline` that can be executed.
     pub fn sink<R, F, Fut>(self, stage: Stage, f: F) -> RunnablePipeline<R>
     where
+        Ctx: Send + Sync + 'static,
+        In: Send + 'static,
         R: Send + 'static,
-        F: FnOnce(&Arc<Ctx>, UnboundedReceiver<In>) -> Fut,
+        F: FnOnce(Arc<Ctx>, UnboundedReceiver<In>) -> Fut + Send + 'static,
         Fut: Future<Output = R> + Send + 'static,
     {
-        let fut = f(&self.context, self.state.receiver);
+        let ctx = self.context.clone();
+        let fut = async move {
+            ctx.timings().send(Event::Start(stage)).ok();
+            let ctx_for_f = ctx.clone();
+            let result = f(ctx_for_f, self.state.receiver).await;
+            ctx.timings().send(Event::End(stage)).ok();
+            result
+        };
+
         let handle = spawn(fut);
         RunnablePipeline {
             handles: self.handles,
