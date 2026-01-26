@@ -30,6 +30,8 @@
 //!     .await;
 //! ```
 
+use std::collections::HashMap;
+
 use error_stack::{FutureExt, Report, ResultExt};
 use futures::future::join_all;
 use tokio::{
@@ -38,7 +40,11 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::timings::{Event, Stage};
+use crate::{
+    prometheus::FileSystemMetrics,
+    timings::{Event, Stage},
+    v2::writer::WriterOptions,
+};
 
 /// Error type for task failures within a [`Pipeline`].
 ///
@@ -57,8 +63,32 @@ impl std::fmt::Display for PipelineError {
 impl core::error::Error for PipelineError {}
 
 /// Shared context available to all pipeline stages.
-struct PipelineContext {
+///
+/// Provides access to shared resources (like timing event channels) that
+/// pipeline stages may need during execution.
+pub struct PipelineContext {
     timings_tx: UnboundedSender<Event>,
+    batch_data: HashMap<String, FileSystemMetrics>,
+    writer_options: WriterOptions,
+}
+
+impl PipelineContext {
+    /// Creates a new pipeline context with the given timing event sender.
+    ///
+    /// # Arguments
+    ///
+    /// * `timings_tx` - Channel sender for emitting [`Event`]s to track stage timings.
+    pub fn new(
+        timings_tx: UnboundedSender<Event>,
+        batch_data: HashMap<String, FileSystemMetrics>,
+        writer_options: WriterOptions,
+    ) -> Self {
+        Self {
+            timings_tx,
+            batch_data,
+            writer_options,
+        }
+    }
 }
 
 /// Typestate marker: pipeline has no source yet.
@@ -196,7 +226,11 @@ mod tests {
     #[tokio::test]
     async fn pipeline_flows_data() {
         let (timings_tx, _) = unbounded_channel::<Event>();
-        let ctx = PipelineContext { timings_tx };
+        let ctx = PipelineContext {
+            timings_tx,
+            batch_data: HashMap::new(),
+            writer_options: WriterOptions::default(),
+        };
 
         let result = Pipeline::new(ctx)
             .source(Stage::DatabasePortal, |_ctx, tx| async move {
