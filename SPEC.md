@@ -766,15 +766,119 @@ Response body includes details:
 
 ---
 
-## 17. Future Considerations
+## 17. Implementation Status & TODO
 
-### 17.1 Alert Integration (Planned)
+### 17.1 CLI Mode (Current Implementation)
+
+**Status:** Core functionality complete
+
+Implemented:
+- Node scanning with role detection
+- Cluster aggregation (3-node clusters)
+- Health classification (Healthy, Degraded, Critical, Unknown)
+- Split-brain detection and resolution
+- Terminal output with color coding
+- CSV export
+- Prometheus integration for backup progress
+- Type-safe pipeline architecture
+
+### 17.2 TODO: Service Mode
+
+**Status:** Not yet implemented (Sections 2, 3, 9.3-9.5, 10)
+
+Required implementation:
+- [ ] Data source registry with health tracking (Section 2.1)
+- [ ] Background fetchers for Portal and Prometheus (Sections 2.2, 2.3)
+- [ ] Data freshness tracking and propagation (Section 2.4)
+- [ ] Cluster state history and transition tracking (Section 3.1)
+- [ ] State transition events (Section 3.3)
+- [ ] HTTP server with endpoints (Section 9.3):
+  - [ ] `/health` - Liveness probe
+  - [ ] `/ready` - Readiness probe with data source status
+  - [ ] `/metrics` - Prometheus metrics exposition
+  - [ ] `/scan` - Trigger on-demand scan
+  - [ ] `/scan/{id}` - Get scan result
+  - [ ] `/clusters` - Current state of all clusters
+  - [ ] `/clusters/{name}` - Detailed cluster state
+  - [ ] `/events` - SSE stream of transitions
+  - [ ] `/sources` - Data source health status
+- [ ] Periodic scan loop with configurable interval
+- [ ] Scan coalescing for concurrent on-demand requests
+- [ ] Rate limiting (minimum 5s between scans)
+- [ ] Graceful shutdown on SIGTERM
+- [ ] Prometheus metrics (Section 10.1):
+  - [ ] `dbscan_cluster_health_state`
+  - [ ] `dbscan_cluster_state_duration_seconds`
+  - [ ] `dbscan_cluster_failover`
+  - [ ] `dbscan_cluster_replication_lag_bytes`
+  - [ ] `dbscan_datasource_*` metrics
+  - [ ] `dbscan_scan_*` metrics
+  - [ ] `dbscan_state_transitions_total`
+
+### 17.3 TODO: Watch Mode
+
+**Status:** Not yet implemented (Section 9.2)
+
+Required implementation:
+- [ ] Terminal UI with refresh
+- [ ] State transition visualization
+- [ ] Event log display
+- [ ] Highlighted changed clusters
+- [ ] Ctrl+C handling
+
+### 17.4 TODO: Configuration System
+
+**Status:** Not yet implemented (Section 12)
+
+Required implementation:
+- [ ] YAML configuration loading (service.yaml)
+- [ ] Topology configuration (topology.yaml)
+  - [ ] Profile definitions
+  - [ ] Per-cluster overrides
+- [ ] Configuration validation
+- [ ] SIGHUP reload support (service mode)
+- [ ] Configuration reload endpoint
+
+### 17.5 TODO: Advanced Features
+
+**Status:** Not yet implemented
+
+Required implementation:
+- [ ] Topology profiles (Section 5.1)
+- [ ] Unexpected topology handling (Section 5.2)
+- [ ] synchronous_standby_names validation (Section 5.3)
+- [ ] Dynamic lag thresholds from Prometheus history (Section 6.4)
+- [ ] Lag diagnostic heuristics breakdown (Section 6.5)
+- [ ] Compound severity escalation (Section 6.3)
+- [ ] Inferring unreachable node state from primary (Section 4.6)
+- [ ] Adaptive rate limiting (Section 4.3)
+- [ ] Certificate hot-reload (Section 4.1)
+- [ ] Plugin system (Section 8)
+- [ ] PostgreSQL version mismatch detection (Section 13.1)
+- [ ] Split-brain remediation suggestions (Section 7.4)
+
+### 17.6 TODO: Pipeline Enhancements
+
+**Status:** Deferred
+
+Optional improvements:
+- [ ] Bounded channels with backpressure
+- [ ] Fan-out/fan-in support for parallel processing
+- [ ] Additional metrics (item counts, throughput)
+- [ ] Graceful shutdown with cancellation tokens
+- [ ] Partial results on stage failure
+
+---
+
+## 18. Future Considerations
+
+### 18.1 Alert Integration (Planned)
 
 - Export health states to monitoring systems
 - Webhook support for state change notifications
 - Integration with PagerDuty/Slack/etc.
 
-### 17.2 Generalization Path
+### 18.2 Generalization Path
 
 - Topology configuration enables non-Fortnox deployments
 - Core logic remains general; conventions are configuration
@@ -903,6 +1007,8 @@ Environment Variables:
 
 ## Appendix D: Open Questions
 
+### Service Mode & HTTP API
+
 1. **Authentication for HTTP endpoints?**
    - Internal network only?
    - mTLS?
@@ -920,6 +1026,30 @@ Environment Variables:
    - Could simplify code (watch mode = service mode without external listener)
    - Or keep them separate for simplicity
 
+### Pipeline Implementation
+
+5. **Bounded vs unbounded channels?**
+   - Currently using unbounded channels for simplicity
+   - Should we add bounded channel variants for backpressure control?
+   - What capacity would be appropriate?
+
+6. **Fan-out/fan-in patterns?**
+   - Current linear pipeline is sufficient for CLI mode
+   - Service mode may benefit from fan-out (multiple concurrent scans)
+   - Would complicate pipeline API - defer until needed
+
+7. **Metrics beyond timing?**
+   - Item counts per stage (nodes processed, clusters analyzed)?
+   - Throughput metrics (items/second)?
+   - Channel buffer sizes and backpressure indicators?
+   - Defer for now - timing is sufficient for v1
+
+8. **Advanced error propagation?**
+   - Current: fail-fast on any stage error
+   - Future: graceful shutdown with cancellation tokens
+   - Partial results when some stages fail?
+   - How to handle transient vs permanent failures?
+
 ---
 
 ## Revision History
@@ -928,3 +1058,4 @@ Environment Variables:
 |---------|------------|----------------|---------|
 | 1.0     | 2026-01-20 | Robert Sjöblom | Initial specification based on requirements interview |
 | 2.0     | 2026-01-20 | Robert Sjöblom | Added service mode, data source management, state tracking, metrics exposition |
+| 2.1     | 2026-01-27 | Robert Sjöblom | Added implementation status section (17) with TODO items; expanded open questions with pipeline considerations |
