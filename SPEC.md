@@ -731,6 +731,10 @@ Response body includes details:
 }
 ```
 
+### 14.5 Implementation Details
+
+For detailed error kind taxonomy, error-stack usage patterns, classification logic, and implementation phases, see [docs/ERROR_HANDLING_DESIGN.md](docs/ERROR_HANDLING_DESIGN.md).
+
 ---
 
 ## 15. Security Considerations
@@ -1059,3 +1063,4 @@ Environment Variables:
 | 1.0     | 2026-01-20 | Robert Sjöblom | Initial specification based on requirements interview |
 | 2.0     | 2026-01-20 | Robert Sjöblom | Added service mode, data source management, state tracking, metrics exposition |
 | 2.1     | 2026-01-27 | Robert Sjöblom | Added implementation status section (17) with TODO items; expanded open questions with pipeline considerations |
+| 2.2     | 2026-01-27 | Robert Sjöblom | Added reference to ERROR_HANDLING_DESIGN.md in section 14.5 |
