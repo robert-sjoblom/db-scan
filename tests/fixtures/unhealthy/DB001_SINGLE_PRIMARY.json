@@ -1,0 +1,14 @@
+{
+    "uptime": "00:59:28.107219",
+    "replication": [],
+    "timeline_id": 11,
+    "configuration": {
+        "wal_level": "logical",
+        "max_wal_senders": "184",
+        "synchronous_commit": "remote_apply",
+        "wal_sender_timeout": "300000",
+        "max_replication_slots": "180",
+        "synchronous_standby_names": ""
+    },
+    "current_wal_lsn": "507/F2A3FC80"
+}

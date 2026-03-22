@@ -381,14 +381,26 @@ fn is_replica_streaming(node: &AnalyzedNode) -> bool {
     }
 }
 
-/// Check if the primary has synchronous_commit disabled (DR mode)
+/// Check if writes are unprotected (no synchronous replication).
+/// This is true when:
+/// - synchronous_commit is "off" or "local"
+/// - OR synchronous_standby_names is empty (even with remote_apply, writes won't block)
+/// See: https://postgresqlco.nf/doc/en/param/synchronous_commit/
 fn is_sync_commit_off(primary: &AnalyzedNode) -> bool {
     if let Role::Primary { health } = &primary.role {
-        health
+        let sync_commit_off = health
             .configuration
             .get("synchronous_commit")
             .map(|v| v == "off" || v == "local")
-            .unwrap_or(false)
+            .unwrap_or(false);
+
+        let standby_names_empty = health
+            .configuration
+            .get("synchronous_standby_names")
+            .map(|v| v.is_empty())
+            .unwrap_or(false);
+
+        sync_commit_off || standby_names_empty
     } else {
         false
     }
@@ -1868,6 +1880,41 @@ mod cluster_state_tests {
         // Scenario: Primary with sync_commit=local (equivalent to off for replication)
         let mut config = HashMap::new();
         config.insert("synchronous_commit".to_string(), "local".to_string());
+
+        let cluster = make_cluster(vec![
+            make_node(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(make_primary_health_with_config(0, None, config)),
+                },
+            ),
+            make_node(2, "dev-pg-app001-db002.sto2.example.com", Role::Unknown),
+            make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
+        ]);
+
+        let actual = analyze(cluster.clone(), HashMap::new());
+        let expected = ClusterHealth::Critical {
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
+            reason: Reason::WritesUnprotected,
+        };
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_critical_writes_unprotected_empty_synchronous_standby_names() {
+        // Scenario: Primary with sync_commit=remote_apply BUT synchronous_standby_names=""
+        // When synchronous_standby_names is empty, PostgreSQL doesn't wait for any standby,
+        // so writes proceed without blocking even though sync_commit suggests otherwise.
+        // This is effectively unprotected writes (DR mode / misconfiguration).
+        // See: https://postgresqlco.nf/doc/en/param/synchronous_commit/
+        let mut config = HashMap::new();
+        config.insert("synchronous_commit".to_string(), "remote_apply".to_string());
+        config.insert("synchronous_standby_names".to_string(), "".to_string());
 
         let cluster = make_cluster(vec![
             make_node(
