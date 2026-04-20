@@ -55,6 +55,7 @@ pub async fn cluster_builder(
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Clone))]
 pub struct Cluster {
     pub id: u32,
     pub name: String,

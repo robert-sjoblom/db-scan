@@ -13,6 +13,7 @@ use crate::v2::{
 };
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(test, derive(Clone))]
 pub struct ReplicaHealthCheckResult {
     pub timeline_id: i32,
     pub wal_receiver: Option<WalReceiverInfo>,
@@ -22,6 +23,7 @@ pub struct ReplicaHealthCheckResult {
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(test, derive(Clone))]
 pub struct WalReceiverInfo {
     pub pid: i32,
     pub status: String,
@@ -41,6 +43,7 @@ pub struct WalReceiverInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(test, derive(Clone))]
 pub struct LagInfo {
     pub apply_lag_bytes: Option<i64>,
     pub last_transaction_replay_at: Option<DateTime<Utc>>,

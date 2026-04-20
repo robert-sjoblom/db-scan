@@ -4,6 +4,7 @@ use thiserror::Error;
 // on external types orz
 
 #[derive(Error, Debug, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Clone))]
 pub enum DbError {
     #[error("TLS Connector Error: {0}")]
     TlsConnector(String),
