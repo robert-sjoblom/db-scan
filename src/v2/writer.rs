@@ -212,6 +212,7 @@ fn extract_row(health: &ClusterHealth, options: &WriterOptions) -> Option<Output
         } => {
             let (primary, replicas) = extract_primary_and_replicas(cluster);
             let (reason_str, details) = format_reason(reason);
+            log_degraded(cluster.name(), &reason_str, *lag);
             Some(OutputRow {
                 status: Status::Degraded,
                 cluster: cluster.name().to_string(),
@@ -225,6 +226,7 @@ fn extract_row(health: &ClusterHealth, options: &WriterOptions) -> Option<Output
         ClusterHealth::Critical { cluster, reason } => {
             let (primary, replicas) = extract_primary_and_replicas_for_critical(cluster, reason);
             let (reason_str, details) = format_reason(reason);
+            log_critical(cluster.name(), reason, &reason_str);
             Some(OutputRow {
                 status: Status::Critical,
                 cluster: cluster.name().to_string(),
@@ -241,6 +243,12 @@ fn extract_row(health: &ClusterHealth, options: &WriterOptions) -> Option<Output
             reason,
         } => {
             let (reason_str, details) = format_reason(reason);
+            tracing::warn!(
+                cluster = %cluster.name(),
+                reachable_nodes = reachable_nodes,
+                reason = %reason_str,
+                "cluster state unknown"
+            );
             Some(OutputRow {
                 status: Status::Unknown,
                 cluster: cluster.name().to_string(),
@@ -250,6 +258,58 @@ fn extract_row(health: &ClusterHealth, options: &WriterOptions) -> Option<Output
                 reason: reason_str,
                 details_json: details,
             })
+        }
+    }
+}
+
+fn log_degraded(cluster: &str, reason: &str, lag: u64) {
+    tracing::warn!(
+        cluster = %cluster,
+        reason = %reason,
+        lag_bytes = lag,
+        "cluster degraded"
+    );
+}
+
+fn log_critical(cluster: &str, reason: &Reason, reason_str: &str) {
+    match reason {
+        Reason::SplitBrain(info) => {
+            tracing::error!(
+                cluster = %cluster,
+                reason = %reason_str,
+                true_primary = %info.true_primary,
+                stale_primaries = ?info.stale_primaries,
+                resolution = ?info.resolution,
+                "SPLIT BRAIN DETECTED"
+            );
+        }
+        Reason::WritesBlocked => {
+            tracing::error!(
+                cluster = %cluster,
+                reason = %reason_str,
+                "writes blocked - no sync replicas available"
+            );
+        }
+        Reason::WritesUnprotected => {
+            tracing::error!(
+                cluster = %cluster,
+                reason = %reason_str,
+                "writes unprotected - no replication redundancy"
+            );
+        }
+        Reason::NoPrimary => {
+            tracing::error!(
+                cluster = %cluster,
+                reason = %reason_str,
+                "no primary found in cluster"
+            );
+        }
+        _ => {
+            tracing::error!(
+                cluster = %cluster,
+                reason = %reason_str,
+                "cluster critical"
+            );
         }
     }
 }

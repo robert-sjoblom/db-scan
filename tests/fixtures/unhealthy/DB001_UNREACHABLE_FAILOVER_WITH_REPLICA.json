@@ -61,6 +61,7 @@
             "role": {
                 "replica": {
                     "health": {
+                        "timeline_id": 60,
                         "wal_receiver": {
                             "pid": 3337530,
                             "status": "streaming",

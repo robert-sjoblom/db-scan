@@ -14,6 +14,7 @@ use crate::v2::{
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ReplicaHealthCheckResult {
+    pub timeline_id: i32,
     pub wal_receiver: Option<WalReceiverInfo>,
     pub lag: LagInfo,
     pub conflicts_by_db: HashMap<String, i32>,
@@ -46,6 +47,7 @@ pub struct LagInfo {
 }
 
 static HEALTH_CHECK_REPLICA_QUERY: &str = "SELECT jsonb_build_object(
+    'timeline_id', (SELECT timeline_id FROM pg_control_checkpoint()),
     'wal_receiver', (
         SELECT COALESCE(to_jsonb(t), '{}'::jsonb)
         FROM (
@@ -103,9 +105,11 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
     let analyzed = match execute_replica_health_check(&client).await {
         Ok(data) => {
             tracing::info!(
+                timeline_id = data.timeline_id,
                 wal_receiver_status = data.wal_receiver.as_ref().map(|w| &w.status),
                 apply_lag_bytes = data.lag.apply_lag_bytes,
                 conflicts_count = data.conflicts_by_db.len(),
+                primary_conninfo = data.configuration.get("primary_conninfo"),
                 "replica health check completed"
             );
 
