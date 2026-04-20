@@ -69,6 +69,11 @@ pub(crate) struct DbScanConfig {
     /// Disable colors in terminal output
     #[arg(long)]
     pub(crate) no_color: bool,
+
+    /// Watch mode: continuously rescan unhealthy clusters at the specified interval (seconds).
+    /// Defaults to 60 seconds when flag is present without a value.
+    #[arg(long, default_missing_value = "60", num_args = 0..=1)]
+    pub(crate) watch: Option<u64>,
 }
 
 impl DbScanConfig {
