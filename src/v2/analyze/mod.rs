@@ -412,7 +412,7 @@ fn is_replica_streaming(node: &AnalyzedNode) -> bool {
 /// Check if writes are unprotected (no synchronous replication).
 /// This is true when:
 /// - synchronous_commit is "off" or "local"
-/// Check if archive command has never succeeded since this node became primary.
+///   Check if archive command has never succeeded since this node became primary.
 ///
 /// Returns Some((failed_count, last_failed_wal)) if:
 /// - archive_mode = "on"
@@ -542,7 +542,7 @@ fn extract_timeline_info<'a>(primaries: &[&'a AnalyzedNode]) -> TimelineInfo<'a>
         .collect();
 
     // Sort by timeline descending (highest first)
-    primary_timelines.sort_by(|a, b| b.1.cmp(&a.1));
+    primary_timelines.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let highest_timeline = primary_timelines[0].1;
     let highest_timeline_node = primary_timelines[0].0;

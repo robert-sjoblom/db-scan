@@ -113,11 +113,6 @@ pub(crate) mod tests_common {
             self
         }
 
-        pub fn with_replication_slots(mut self, slots: Vec<ReplicationSlot>) -> Self {
-            self.replication_slots = slots;
-            self
-        }
-
         pub fn build(self) -> PrimaryHealthCheckResult {
             let base_lsn = "48F/6957B540";
             let has_high_lag = self.replay_lag.as_ref().is_some_and(|lag| {
@@ -193,6 +188,7 @@ pub(crate) mod tests_common {
         has_wal_receiver: bool,
     }
 
+    #[allow(dead_code)]
     impl ReplicaHealthBuilder {
         pub fn new() -> Self {
             Self {
@@ -267,6 +263,7 @@ pub(crate) mod tests_common {
         role: Role,
     }
 
+    #[allow(dead_code)]
     impl NodeBuilder {
         pub fn new(name: &str) -> Self {
             Self {
@@ -288,21 +285,21 @@ pub(crate) mod tests_common {
             self
         }
 
-        pub fn as_primary(mut self, health: PrimaryHealthCheckResult) -> Self {
+        pub fn with_primary(mut self, health: PrimaryHealthCheckResult) -> Self {
             self.role = Role::Primary {
                 health: Box::new(health),
             };
             self
         }
 
-        pub fn as_replica(mut self, health: ReplicaHealthCheckResult) -> Self {
+        pub fn with_replica(mut self, health: ReplicaHealthCheckResult) -> Self {
             self.role = Role::Replica {
                 health: Box::new(health),
             };
             self
         }
 
-        pub fn as_unknown(mut self) -> Self {
+        pub fn with_unknown(mut self) -> Self {
             self.role = Role::Unknown;
             self
         }

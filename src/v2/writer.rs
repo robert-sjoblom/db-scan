@@ -1,10 +1,12 @@
+mod csv;
+
 use std::{
     collections::{BTreeMap, HashMap},
-    fs::File,
-    io::{BufWriter, IsTerminal, Write},
-    path::Path,
+    io::IsTerminal,
     sync::Arc,
 };
+
+use csv::CsvWriter;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -40,7 +42,7 @@ pub struct WriterOptions {
 
 /// A row of output data extracted from ClusterHealth
 #[derive(Debug, Eq, PartialEq)]
-struct OutputRow {
+pub(super) struct OutputRow {
     status: Status,
     cluster: String,
     primary: String,
@@ -65,7 +67,7 @@ impl PartialOrd for OutputRow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Status {
+pub(super) enum Status {
     Healthy = 0,
     Unknown = 1,
     Degraded = 2,
@@ -89,42 +91,6 @@ impl Status {
             Status::Unknown => colors::GRAY,
             Status::Healthy => colors::GREEN,
         }
-    }
-}
-
-/// CSV writer that streams rows as they arrive
-struct CsvWriter {
-    writer: BufWriter<File>,
-}
-
-impl CsvWriter {
-    fn new(path: &str) -> std::io::Result<Self> {
-        let file = File::create(Path::new(path))?;
-        let mut writer = BufWriter::new(file);
-        // Write header
-        writeln!(
-            writer,
-            "status,cluster,primary,replicas,lag_bytes,reason,details_json"
-        )?;
-        Ok(Self { writer })
-    }
-
-    fn write_row(&mut self, row: &OutputRow) -> std::io::Result<()> {
-        writeln!(
-            self.writer,
-            "{},{},{},{},{},{},\"{}\"",
-            row.status.as_str(),
-            row.cluster,
-            row.primary,
-            row.replicas,
-            row.lag.map(|l| l.to_string()).unwrap_or_default(),
-            row.reason,
-            row.details_json.replace('"', "\"\"")
-        )
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
     }
 }
 
@@ -552,16 +518,19 @@ fn format_primary_with_failover(primary: &str, cluster: &AnalyzedCluster) -> Str
     primary.to_string()
 }
 
-/// Extract db number (e.g., "db002") from full node name
+/// Extract db number with zone (e.g., "db002@sto1") from full node name
 fn extract_db_number(node_name: &str) -> String {
     // Node naming: env-pg-appXXX-dbYYY.zone.example.com
-    if let Some(db_part) = node_name.split('-').find(|p| p.starts_with("db")) {
-        if let Some(dot_pos) = db_part.find('.') {
-            return db_part[..dot_pos].to_string();
-        }
-        return db_part.to_string();
+    let Some(db_part) = node_name.split('-').find(|p| p.starts_with("db")) else {
+        return node_name.to_string();
+    };
+
+    let mut parts = db_part.splitn(3, '.');
+    match (parts.next(), parts.next()) {
+        (Some(db_num), Some(zone)) => format!("{}@{}", db_num, zone),
+        (Some(db_num), None) => db_num.to_string(),
+        _ => node_name.to_string(),
     }
-    node_name.to_string()
 }
 
 /// Normalize application_name from pg_stat_replication to db number
