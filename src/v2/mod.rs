@@ -171,6 +171,7 @@ mod tests_common {
     impl Clone for ReplicaHealthCheckResult {
         fn clone(&self) -> Self {
             Self {
+                timeline_id: self.timeline_id,
                 wal_receiver: self.wal_receiver.clone(),
                 lag: self.lag.clone(),
                 conflicts_by_db: self.conflicts_by_db.clone(),

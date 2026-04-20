@@ -219,6 +219,7 @@ fn analyze(cluster: Cluster, backup_progress: HashMap<String, u16>) -> ClusterHe
             max_lag,
             rebuilding_count,
             chained_replica,
+            sync_commit_off,
         ),
         1 => analyze_one_replica_down(cluster, backup_progress, max_lag),
         0 => analyze_no_replicas(cluster, backup_progress, sync_commit_off),
@@ -243,8 +244,21 @@ fn analyze_full_redundancy(
     max_lag: u64,
     rebuilding_count: usize,
     chained_replica: Option<ChainedReplicaInfo>,
+    sync_commit_off: bool,
 ) -> ClusterHealth {
-    // Check for rebuilding replicas first
+    // If ALL replicas are not streaming AND sync replication is disabled,
+    // writes are unprotected - this is Critical, not just Degraded
+    if rebuilding_count == 2 && sync_commit_off {
+        return ClusterHealth::Critical {
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress,
+            },
+            reason: Reason::WritesUnprotected,
+        };
+    }
+
+    // Check for rebuilding replicas
     if rebuilding_count > 0 {
         return ClusterHealth::Degraded {
             lag: max_lag,
@@ -385,6 +399,7 @@ fn is_replica_streaming(node: &AnalyzedNode) -> bool {
 /// This is true when:
 /// - synchronous_commit is "off" or "local"
 /// - OR synchronous_standby_names is empty (even with remote_apply, writes won't block)
+///
 /// See: https://postgresqlco.nf/doc/en/param/synchronous_commit/
 fn is_sync_commit_off(primary: &AnalyzedNode) -> bool {
     if let Role::Primary { health } = &primary.role {
@@ -1218,6 +1233,7 @@ mod cluster_state_tests {
 
     fn make_replica_health() -> ReplicaHealthCheckResult {
         ReplicaHealthCheckResult {
+            timeline_id: 11,
             wal_receiver: Some(WalReceiverInfo {
                 pid: 4053449,
                 status: "streaming".to_string(),
@@ -1495,6 +1511,7 @@ mod cluster_state_tests {
         // Scenario: db002 has higher timeline AND replica is following db002
         // Use different IPs so we can match replica to the correct primary
         let replica_health = ReplicaHealthCheckResult {
+            timeline_id: 12,
             wal_receiver: Some(WalReceiverInfo {
                 pid: 4053449,
                 status: "streaming".to_string(),
@@ -1575,6 +1592,7 @@ mod cluster_state_tests {
         // This happens when db002 was promoted but then isolated, while db001 continued serving
         // The replica following db001 is the authoritative evidence of the true primary
         let replica_health = ReplicaHealthCheckResult {
+            timeline_id: 11,
             wal_receiver: Some(WalReceiverInfo {
                 pid: 4053449,
                 status: "streaming".to_string(),
@@ -1641,6 +1659,91 @@ mod cluster_state_tests {
                 resolution: SplitBrainResolution::ReplicaOverridesTimeline {
                     true_primary_timeline: 11,
                     stale_timeline: 12,
+                    replicas_following_true: vec![
+                        "dev-pg-app001-db003.sto3.example.com".to_string(),
+                    ],
+                },
+            }),
+        };
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_critical_split_brain_after_hard_failover_replica_follows_new_primary() {
+        // Scenario: Hard failover occurred, db002 was promoted to primary.
+        // db001 came back online as a stale primary (same timeline, no replicas).
+        // db003 correctly reconnected to db002 (the new primary).
+        // Both primaries have the same timeline, so we rely on replica evidence.
+        // db002 should be identified as the true primary because db003 follows it.
+        let replica_health = ReplicaHealthCheckResult {
+            timeline_id: 13,
+            wal_receiver: Some(WalReceiverInfo {
+                pid: 2727816,
+                status: "streaming".to_string(),
+                receive_start_lsn: "281/7D000000".to_string(),
+                receive_start_tli: 13,
+                written_lsn: "281/BAAA6510".to_string(),
+                flushed_lsn: "281/BAAA6510".to_string(),
+                received_tli: 13,
+                last_msg_send_time: Some(Utc::now()),
+                last_msg_receipt_time: Some(Utc::now()),
+                latest_end_lsn: "281/BAAA6510".to_string(),
+                latest_end_time: Some(Utc::now()),
+                slot_name: None,
+                sender_host: "127.2.12.162".to_string(), // db002's IP - following new primary
+                sender_port: 5432,
+                conninfo: "user=replicator host=127.2.12.162".to_string(),
+            }),
+            lag: LagInfo {
+                apply_lag_bytes: Some(0),
+                last_transaction_replay_at: Some(Utc::now()),
+            },
+            conflicts_by_db: HashMap::new(),
+            configuration: HashMap::new(),
+        };
+
+        let cluster = make_cluster(vec![
+            // db001: Stale primary that came back after failover (no replicas connected)
+            make_node_with_ip(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(make_primary_health_with_timeline(0, None, 13)),
+                },
+                Ipv4Addr::new(127, 1, 12, 162),
+            ),
+            // db002: New primary (promoted during failover, has db003 streaming)
+            make_node_with_ip(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Primary {
+                    health: Box::new(make_primary_health_with_timeline(1, None, 13)),
+                },
+                Ipv4Addr::new(127, 2, 12, 162),
+            ),
+            // db003: Replica correctly following db002
+            make_node_with_ip(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Replica {
+                    health: Box::new(replica_health),
+                },
+                Ipv4Addr::new(127, 3, 12, 162),
+            ),
+        ]);
+
+        let actual = analyze(cluster.clone(), HashMap::new());
+        // db002 is the true primary because the replica is following it
+        let expected = ClusterHealth::Critical {
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
+            reason: Reason::SplitBrain(SplitBrainInfo {
+                true_primary: "dev-pg-app001-db002.sto2.example.com".to_string(),
+                stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_string()],
+                resolution: SplitBrainResolution::ReplicaFollowing {
                     replicas_following_true: vec![
                         "dev-pg-app001-db003.sto3.example.com".to_string(),
                     ],
@@ -1926,6 +2029,65 @@ mod cluster_state_tests {
             ),
             make_node(2, "dev-pg-app001-db002.sto2.example.com", Role::Unknown),
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
+        ]);
+
+        let actual = analyze(cluster.clone(), HashMap::new());
+        let expected = ClusterHealth::Critical {
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
+            reason: Reason::WritesUnprotected,
+        };
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_critical_writes_unprotected_disconnected_replicas_empty_standby_names() {
+        // Scenario: Primary with sync_commit=remote_apply, synchronous_standby_names=""
+        // Two replicas exist but are disconnected (wal_receiver=None).
+        // This happens during DR when standby names were cleared and replicas
+        // can't reconnect (e.g., broken prev-link, WAL issues).
+        // Even though replicas are visible, no replication is happening.
+        let mut config = HashMap::new();
+        config.insert("synchronous_commit".to_string(), "remote_apply".to_string());
+        config.insert("synchronous_standby_names".to_string(), "".to_string());
+
+        // Replica health with no wal_receiver (disconnected)
+        let disconnected_replica = ReplicaHealthCheckResult {
+            timeline_id: 18,
+            wal_receiver: None,
+            lag: LagInfo {
+                apply_lag_bytes: Some(131072),
+                last_transaction_replay_at: Some(Utc::now()),
+            },
+            conflicts_by_db: HashMap::new(),
+            configuration: HashMap::new(),
+        };
+
+        let cluster = make_cluster(vec![
+            make_node(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(make_primary_health_with_config(0, None, config)),
+                },
+            ),
+            make_node(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(disconnected_replica.clone()),
+                },
+            ),
+            make_node(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Replica {
+                    health: Box::new(disconnected_replica),
+                },
+            ),
         ]);
 
         let actual = analyze(cluster.clone(), HashMap::new());

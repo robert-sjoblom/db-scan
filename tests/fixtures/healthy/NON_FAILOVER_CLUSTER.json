@@ -83,6 +83,7 @@
             "role": {
                 "replica": {
                     "health": {
+                        "timeline_id": 11,
                         "wal_receiver": {
                             "pid": 4053449,
                             "status": "streaming",
@@ -125,6 +126,7 @@
             "role": {
                 "replica": {
                     "health": {
+                        "timeline_id": 11,
                         "wal_receiver": {
                             "pid": 1856242,
                             "status": "streaming",
