@@ -641,6 +641,18 @@ fn format_reason(reason: &Reason) -> (String, String) {
         }
         Reason::WritesBlocked => ("WritesBlocked".to_string(), "{}".to_string()),
         Reason::WritesUnprotected => ("WritesUnprotected".to_string(), "{}".to_string()),
+        Reason::ArchiveFailure {
+            failed_count,
+            last_failed_wal,
+        } => {
+            let short = format!("ArchiveFailure: {} failures", failed_count);
+            let details = serde_json::json!({
+                "failed_count": failed_count,
+                "last_failed_wal": last_failed_wal
+            })
+            .to_string();
+            (short, details)
+        }
         Reason::NoNodesReachable => ("NoNodesReachable".to_string(), "{}".to_string()),
         Reason::UnexpectedTopology => ("UnexpectedTopology".to_string(), "{}".to_string()),
     }

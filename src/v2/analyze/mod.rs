@@ -191,6 +191,20 @@ fn analyze(cluster: Cluster, backup_progress: HashMap<String, u16>) -> ClusterHe
     // At this point we have exactly 1 primary
     let primary = primaries[0];
 
+    // Check for archive failure (archive_mode=on but never succeeded)
+    if let Some((failed_count, last_failed_wal)) = check_archive_failure(primary) {
+        return ClusterHealth::Critical {
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress,
+            },
+            reason: Reason::ArchiveFailure {
+                failed_count,
+                last_failed_wal,
+            },
+        };
+    }
+
     // Check if failover occurred (primary is not db001)
     let failover = is_failover_node(&primary.node_name);
 
@@ -398,6 +412,33 @@ fn is_replica_streaming(node: &AnalyzedNode) -> bool {
 /// Check if writes are unprotected (no synchronous replication).
 /// This is true when:
 /// - synchronous_commit is "off" or "local"
+/// Check if archive command has never succeeded since this node became primary.
+///
+/// Returns Some((failed_count, last_failed_wal)) if:
+/// - archive_mode = "on"
+/// - archived_count = 0 (no successful archives)
+/// - failed_count > 0 (there have been failures)
+///
+/// TODO: Consider adding Degraded state when `last_failed_time > last_archived_time`
+/// (archive was working but most recent attempt failed). WAL archives at least every 15 min.
+fn check_archive_failure(primary: &AnalyzedNode) -> Option<(i64, Option<String>)> {
+    let Role::Primary { health } = &primary.role else {
+        return None;
+    };
+
+    let archive_mode = health.configuration.get("archive_mode")?;
+    if archive_mode != "on" {
+        return None;
+    }
+
+    let archiver = &health.archiver;
+    if archiver.archived_count == 0 && archiver.failed_count > 0 {
+        Some((archiver.failed_count, archiver.last_failed_wal.clone()))
+    } else {
+        None
+    }
+}
+
 /// - OR synchronous_standby_names is empty (even with remote_apply, writes won't block)
 ///
 /// See: https://postgresqlco.nf/doc/en/param/synchronous_commit/
@@ -883,6 +924,11 @@ pub enum Reason {
     WritesBlocked,
     /// Primary has sync_commit=off with no replicas - DR mode, no redundancy
     WritesUnprotected,
+    /// Archive command has never succeeded since becoming primary
+    ArchiveFailure {
+        failed_count: i64,
+        last_failed_wal: Option<String>,
+    },
 
     // Unknown reasons
     /// Cannot connect to any nodes in the cluster
@@ -1066,7 +1112,7 @@ mod cluster_state_tests {
         cluster::Cluster,
         scan::{
             AnalyzedNode, Role,
-            health_check_primary::PrimaryHealthCheckResult,
+            health_check_primary::{ArchiverStats, PrimaryHealthCheckResult},
             health_check_replica::{LagInfo, ReplicaHealthCheckResult, WalReceiverInfo},
         },
         tests_common::{ClusterBuilder, NodeBuilder, PrimaryHealthBuilder, ReplicaHealthBuilder},
@@ -1949,6 +1995,71 @@ mod cluster_state_tests {
                 backup_progress: HashMap::new(),
             },
             reason: Reason::WritesUnprotected,
+        };
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_critical_archive_failure_never_succeeded() {
+        // Scenario: Primary with archive_mode=on but archiving has never succeeded
+        // archived_count=0 with failed_count > 0 means archive command never worked
+        let mut config = HashMap::new();
+        config.insert("archive_mode".to_string(), "on".to_string());
+        config.insert(
+            "archive_command".to_string(),
+            "/usr/bin/pgbackrest --stanza=dev-pg-app001 archive-push %p".to_string(),
+        );
+
+        let archiver = ArchiverStats {
+            archived_count: 0,
+            failed_count: 16452,
+            last_archived_wal: None,
+            last_archived_time: None,
+            last_failed_wal: Some("000000120000058300000073".to_string()),
+            last_failed_time: None,
+        };
+
+        let primary_health = PrimaryHealthBuilder::new()
+            .with_replication(2)
+            .with_config(config)
+            .with_archiver(archiver)
+            .build();
+
+        let cluster = make_cluster(vec![
+            make_node(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(primary_health),
+                },
+            ),
+            make_node(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+            ),
+            make_node(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+            ),
+        ]);
+
+        let actual = analyze(cluster.clone(), HashMap::new());
+        let expected = ClusterHealth::Critical {
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
+            reason: Reason::ArchiveFailure {
+                failed_count: 16452,
+                last_failed_wal: Some("000000120000058300000073".to_string()),
+            },
         };
 
         assert_eq!(actual, expected);
