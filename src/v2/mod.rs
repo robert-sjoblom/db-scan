@@ -16,7 +16,8 @@ pub(crate) mod tests_common {
         scan::{
             AnalyzedNode, Role,
             health_check_primary::{
-                PgSyncSettings, PrimaryHealthCheckResult, ReplicationConnection,
+                ArchiverStats, PgSyncSettings, PrimaryHealthCheckResult, ReplicationConnection,
+                ReplicationSlot,
             },
             health_check_replica::{LagInfo, ReplicaHealthCheckResult, WalReceiverInfo},
         },
@@ -64,6 +65,8 @@ pub(crate) mod tests_common {
         replay_lag: Option<String>,
         configuration: HashMap<String, String>,
         timeline_id: i32,
+        archiver: ArchiverStats,
+        replication_slots: Vec<ReplicationSlot>,
     }
 
     impl PrimaryHealthBuilder {
@@ -73,6 +76,15 @@ pub(crate) mod tests_common {
                 replay_lag: None,
                 configuration: HashMap::new(),
                 timeline_id: 11,
+                archiver: ArchiverStats {
+                    archived_count: 0,
+                    failed_count: 0,
+                    last_archived_wal: None,
+                    last_archived_time: None,
+                    last_failed_wal: None,
+                    last_failed_time: None,
+                },
+                replication_slots: vec![],
             }
         }
 
@@ -93,6 +105,16 @@ pub(crate) mod tests_common {
 
         pub fn with_timeline(mut self, id: i32) -> Self {
             self.timeline_id = id;
+            self
+        }
+
+        pub fn with_archiver(mut self, archiver: ArchiverStats) -> Self {
+            self.archiver = archiver;
+            self
+        }
+
+        pub fn with_replication_slots(mut self, slots: Vec<ReplicationSlot>) -> Self {
+            self.replication_slots = slots;
             self
         }
 
@@ -141,6 +163,8 @@ pub(crate) mod tests_common {
                 current_wal_lsn: base_lsn.to_string(),
                 configuration: self.configuration,
                 replication,
+                archiver: self.archiver,
+                replication_slots: self.replication_slots,
             }
         }
     }

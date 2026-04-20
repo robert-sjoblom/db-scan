@@ -49,12 +49,36 @@ impl From<String> for PgSyncSettings {
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[cfg_attr(test, derive(Clone))]
+pub struct ArchiverStats {
+    pub archived_count: i64,
+    pub failed_count: i64,
+    pub last_archived_wal: Option<String>,
+    pub last_archived_time: Option<DateTime<Utc>>,
+    pub last_failed_wal: Option<String>,
+    pub last_failed_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(test, derive(Clone))]
+pub struct ReplicationSlot {
+    pub slot_name: String,
+    pub plugin: Option<String>,
+    pub slot_type: String,
+    pub active: bool,
+    pub restart_lsn: Option<String>,
+    pub wal_retained: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(test, derive(Clone))]
 pub struct PrimaryHealthCheckResult {
     pub timeline_id: i32,
     pub uptime: String,
     pub current_wal_lsn: String,
     pub configuration: HashMap<String, String>,
     pub replication: Vec<ReplicationConnection>,
+    pub archiver: ArchiverStats,
+    pub replication_slots: Vec<ReplicationSlot>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -96,7 +120,9 @@ static HEALTH_CHECK_PRIMARY_QUERY: &str = "SELECT jsonb_build_object(
             'wal_level',
             'max_wal_senders',
             'wal_sender_timeout',
-            'max_replication_slots'
+            'max_replication_slots',
+            'archive_mode',
+            'archive_command'
         )
     ),
     'replication', (
@@ -125,6 +151,30 @@ static HEALTH_CHECK_PRIMARY_QUERY: &str = "SELECT jsonb_build_object(
                 reply_time
             FROM
                 pg_stat_replication
+        ) t
+    ),
+    'archiver', (
+        SELECT jsonb_build_object(
+            'archived_count', archived_count,
+            'failed_count', failed_count,
+            'last_archived_wal', last_archived_wal,
+            'last_archived_time', last_archived_time,
+            'last_failed_wal', last_failed_wal,
+            'last_failed_time', last_failed_time
+        )
+        FROM pg_stat_archiver
+    ),
+    'replication_slots', (
+        SELECT COALESCE(jsonb_agg(t), '[]'::jsonb)
+        FROM (
+            SELECT
+                slot_name,
+                plugin,
+                slot_type,
+                active,
+                restart_lsn::text,
+                pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS wal_retained
+            FROM pg_replication_slots
         ) t
     )
 )::text;";
