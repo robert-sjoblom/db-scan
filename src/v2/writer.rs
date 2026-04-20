@@ -1,7 +1,7 @@
 mod csv;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     io::IsTerminal,
     sync::Arc,
 };
@@ -38,6 +38,15 @@ pub struct WriterOptions {
     pub csv_path: Option<String>,
     /// Disable colors in terminal output
     pub no_color: bool,
+}
+
+/// Result of a scan, containing both the formatted output and clusters to rescan.
+#[derive(Debug)]
+pub struct ScanResult {
+    /// Formatted terminal output string.
+    pub output: String,
+    /// Cluster names that need to be rescanned (Degraded, Critical, or Unknown).
+    pub clusters_to_rescan: HashSet<String>,
 }
 
 /// A row of output data extracted from ClusterHealth
@@ -94,15 +103,16 @@ impl Status {
     }
 }
 
-/// Collects ClusterHealth results, streams to CSV, returns terminal output string.
+/// Collects ClusterHealth results, streams to CSV, returns scan result.
 ///
-/// Returns a formatted string for terminal display. The caller should print this
-/// after all other logging is complete.
+/// Returns a `ScanResult` containing both the formatted terminal output and
+/// the set of cluster names that need rescanning (Degraded, Critical, or Unknown).
 pub async fn write_results(
     ctx: Arc<PipelineContext>,
     mut analyze_rx: UnboundedReceiver<ClusterHealth>,
-) -> String {
+) -> ScanResult {
     let mut rows: Vec<OutputRow> = Vec::new();
+    let mut clusters_to_rescan: HashSet<String> = HashSet::new();
 
     // Initialize CSV writer if path provided
     let mut csv_writer =
@@ -119,6 +129,9 @@ pub async fn write_results(
 
     // Collect results, streaming to CSV as they arrive
     while let Some(health) = analyze_rx.recv().await {
+        // Track unhealthy clusters for watch mode rescanning
+        clusters_to_rescan.extend(cluster_to_rescan(&health));
+
         if let Some(row) = extract_row(&health, &ctx.writer_options) {
             // Write to CSV immediately
             if let Some(ref mut writer) = csv_writer
@@ -142,7 +155,21 @@ pub async fn write_results(
     // Sort by severity (Healthy first, then Unknown, Degraded, Critical), then cluster alphabetically
     rows.sort();
 
-    build_terminal_output(&rows, &ctx.writer_options)
+    let output = build_terminal_output(&rows, &ctx.writer_options);
+    ScanResult {
+        output,
+        clusters_to_rescan,
+    }
+}
+
+/// Returns the cluster name if it should be rescanned, None otherwise.
+fn cluster_to_rescan(health: &ClusterHealth) -> Option<String> {
+    match health {
+        ClusterHealth::Healthy { .. } => None,
+        ClusterHealth::Degraded { cluster, .. }
+        | ClusterHealth::Critical { cluster, .. }
+        | ClusterHealth::Unknown { cluster, .. } => Some(cluster.name().to_string()),
+    }
 }
 
 /// Extract an OutputRow from ClusterHealth, returning None if it should be filtered out

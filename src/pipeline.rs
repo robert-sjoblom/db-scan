@@ -77,7 +77,7 @@ pub struct PipelineContext {
     /// Pre-loaded filesystem metrics keyed by cluster name.
     pub batch_data: HashMap<String, FileSystemMetrics>,
     /// Configuration options for the output writer.
-    pub writer_options: WriterOptions,
+    pub writer_options: Arc<WriterOptions>,
 }
 
 impl PipelineContext {
@@ -89,7 +89,7 @@ impl PipelineContext {
     pub fn new(
         timings_tx: UnboundedSender<Event>,
         batch_data: HashMap<String, FileSystemMetrics>,
-        writer_options: WriterOptions,
+        writer_options: Arc<WriterOptions>,
     ) -> Self {
         Self {
             timings_tx,
@@ -274,7 +274,7 @@ mod tests {
         let ctx = PipelineContext {
             timings_tx,
             batch_data: HashMap::new(),
-            writer_options: WriterOptions::default(),
+            writer_options: Arc::new(WriterOptions::default()),
         };
 
         let result = Pipeline::new(ctx)
