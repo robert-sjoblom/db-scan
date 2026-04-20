@@ -19,10 +19,14 @@ pub mod client {
         models::{PrometheusResponse, Query},
     };
 
+    #[cfg(not(test))]
     const PROMETHEUS_URL: &str = match option_env!("PROMETHEUS_URL") {
         Some(url) => url,
         None => "https://prometheus.example.com",
     };
+
+    #[cfg(test)]
+    const PROMETHEUS_URL: &str = "https://prometheus.example.com";
 
     pub async fn get_batch_filesystem_data(
         hostname: impl AsRef<str>,

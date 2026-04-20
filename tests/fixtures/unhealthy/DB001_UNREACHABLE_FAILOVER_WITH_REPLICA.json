@@ -46,7 +46,16 @@
                                 "sync_state": "quorum",
                                 "reply_time": "2025-09-20T19:04:03.640725Z"
                             }
-                        ]
+                        ],
+                        "archiver": {
+                            "archived_count": 850,
+                            "failed_count": 0,
+                            "last_archived_wal": "00000060000003560000001A",
+                            "last_archived_time": "2025-09-20T19:00:00.000000Z",
+                            "last_failed_wal": null,
+                            "last_failed_time": null
+                        },
+                        "replication_slots": []
                     }
                 }
             },

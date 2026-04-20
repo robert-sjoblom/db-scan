@@ -191,6 +191,20 @@ fn analyze(cluster: Cluster, backup_progress: HashMap<String, u16>) -> ClusterHe
     // At this point we have exactly 1 primary
     let primary = primaries[0];
 
+    // Check for archive failure (archive_mode=on but never succeeded)
+    if let Some((failed_count, last_failed_wal)) = check_archive_failure(primary) {
+        return ClusterHealth::Critical {
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress,
+            },
+            reason: Reason::ArchiveFailure {
+                failed_count,
+                last_failed_wal,
+            },
+        };
+    }
+
     // Check if failover occurred (primary is not db001)
     let failover = is_failover_node(&primary.node_name);
 
@@ -398,6 +412,33 @@ fn is_replica_streaming(node: &AnalyzedNode) -> bool {
 /// Check if writes are unprotected (no synchronous replication).
 /// This is true when:
 /// - synchronous_commit is "off" or "local"
+///   Check if archive command has never succeeded since this node became primary.
+///
+/// Returns Some((failed_count, last_failed_wal)) if:
+/// - archive_mode = "on"
+/// - archived_count = 0 (no successful archives)
+/// - failed_count > 0 (there have been failures)
+///
+/// TODO: Consider adding Degraded state when `last_failed_time > last_archived_time`
+/// (archive was working but most recent attempt failed). WAL archives at least every 15 min.
+fn check_archive_failure(primary: &AnalyzedNode) -> Option<(i64, Option<String>)> {
+    let Role::Primary { health } = &primary.role else {
+        return None;
+    };
+
+    let archive_mode = health.configuration.get("archive_mode")?;
+    if archive_mode != "on" {
+        return None;
+    }
+
+    let archiver = &health.archiver;
+    if archiver.archived_count == 0 && archiver.failed_count > 0 {
+        Some((archiver.failed_count, archiver.last_failed_wal.clone()))
+    } else {
+        None
+    }
+}
+
 /// - OR synchronous_standby_names is empty (even with remote_apply, writes won't block)
 ///
 /// See: https://postgresqlco.nf/doc/en/param/synchronous_commit/
@@ -501,7 +542,7 @@ fn extract_timeline_info<'a>(primaries: &[&'a AnalyzedNode]) -> TimelineInfo<'a>
         .collect();
 
     // Sort by timeline descending (highest first)
-    primary_timelines.sort_by(|a, b| b.1.cmp(&a.1));
+    primary_timelines.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let highest_timeline = primary_timelines[0].1;
     let highest_timeline_node = primary_timelines[0].0;
@@ -883,6 +924,11 @@ pub enum Reason {
     WritesBlocked,
     /// Primary has sync_commit=off with no replicas - DR mode, no redundancy
     WritesUnprotected,
+    /// Archive command has never succeeded since becoming primary
+    ArchiveFailure {
+        failed_count: i64,
+        last_failed_wal: Option<String>,
+    },
 
     // Unknown reasons
     /// Cannot connect to any nodes in the cluster
@@ -1066,132 +1112,17 @@ mod cluster_state_tests {
         cluster::Cluster,
         scan::{
             AnalyzedNode, Role,
-            health_check_primary::{
-                PgSyncSettings, PrimaryHealthCheckResult, ReplicationConnection,
-            },
+            health_check_primary::{ArchiverStats, PrimaryHealthCheckResult},
             health_check_replica::{LagInfo, ReplicaHealthCheckResult, WalReceiverInfo},
         },
+        tests_common::{ClusterBuilder, NodeBuilder, PrimaryHealthBuilder, ReplicaHealthBuilder},
     };
     use chrono::Utc;
     use std::net::Ipv4Addr;
 
     use pretty_assertions::assert_eq;
 
-    // ==================== Test fixture builders ====================
-
-    /// Builder for creating `PrimaryHealthCheckResult` test fixtures.
-    ///
-    /// Provides a fluent API for constructing test data with sensible defaults.
-    struct PrimaryHealthBuilder {
-        replication_count: usize,
-        replay_lag: Option<String>,
-        configuration: HashMap<String, String>,
-        timeline_id: i32,
-    }
-
-    impl PrimaryHealthBuilder {
-        /// Create a new builder with default values.
-        fn new() -> Self {
-            Self {
-                replication_count: 0,
-                replay_lag: None,
-                configuration: HashMap::new(),
-                timeline_id: 11,
-            }
-        }
-
-        /// Set the number of replication connections.
-        fn with_replication(mut self, count: usize) -> Self {
-            self.replication_count = count;
-            self
-        }
-
-        /// Set the replay lag for all replication connections.
-        fn with_lag(mut self, lag: &str) -> Self {
-            self.replay_lag = Some(lag.to_string());
-            self
-        }
-
-        /// Set the configuration map.
-        fn with_config(mut self, configuration: HashMap<String, String>) -> Self {
-            self.configuration = configuration;
-            self
-        }
-
-        /// Set the timeline ID.
-        fn with_timeline(mut self, id: i32) -> Self {
-            self.timeline_id = id;
-            self
-        }
-
-        /// Build the `PrimaryHealthCheckResult`.
-        fn build(self) -> PrimaryHealthCheckResult {
-            // If there's high lag specified (>= 5 seconds), create lagging LSN values
-            // Base LSN: 48F/6957B540
-            let base_lsn = "48F/6957B540";
-            let has_high_lag = self.replay_lag.as_ref().is_some_and(|lag| {
-                // Parse lag to check if it's >= 5 seconds
-                parse_lag_seconds(lag)
-                    .map(|seconds| seconds >= 5)
-                    .unwrap_or(false)
-            });
-
-            let lagging_lsn = if has_high_lag {
-                // Create lag of ~100MB (which would be ~6.25 seconds at 16MB/s)
-                "48F/6357B540" // ~100MB behind
-            } else {
-                base_lsn
-            };
-
-            let replication: Vec<ReplicationConnection> = (0..self.replication_count)
-                .map(|i| ReplicationConnection {
-                    pid: 1000 + i as i32,
-                    usesysid: 16387,
-                    usename: "replicator".to_string(),
-                    application_name: format!("dev_pg_app001_db00{}", i + 2),
-                    client_addr: Some(format!("10.8{}.12.151", i + 2)),
-                    client_hostname: None,
-                    client_port: Some(63512 + i as i32),
-                    backend_start: Utc::now(),
-                    backend_xmin: Some("621647066".to_string()),
-                    state: "streaming".to_string(),
-                    sent_lsn: Some(base_lsn.to_string()),
-                    write_lsn: Some(lagging_lsn.to_string()),
-                    flush_lsn: Some(lagging_lsn.to_string()),
-                    replay_lsn: Some(lagging_lsn.to_string()),
-                    write_lag: Some("00:00:00.000354".to_string()),
-                    flush_lag: Some("00:00:00.000895".to_string()),
-                    replay_lag: self.replay_lag.clone(),
-                    sync_priority: 1,
-                    sync_state: PgSyncSettings::Quorum,
-                    reply_time: Some(Utc::now()),
-                })
-                .collect();
-
-            PrimaryHealthCheckResult {
-                timeline_id: self.timeline_id,
-                uptime: "26 days 14:39:06.703824".to_string(),
-                current_wal_lsn: base_lsn.to_string(),
-                configuration: self.configuration,
-                replication,
-            }
-        }
-    }
-
-    // Helper function to parse lag string to seconds
-    fn parse_lag_seconds(lag: &str) -> Option<u64> {
-        let parts: Vec<&str> = lag.split(':').collect();
-        if parts.len() != 3 {
-            return None;
-        }
-        let hours: u64 = parts[0].parse().ok()?;
-        let minutes: u64 = parts[1].parse().ok()?;
-        let seconds_parts: Vec<&str> = parts[2].split('.').collect();
-        let seconds: u64 = seconds_parts[0].parse().ok()?;
-        Some(hours * 3600 + minutes * 60 + seconds)
-    }
-
-    // Convenience functions that use the builder internally
+    // Convenience functions using the shared builders
     fn make_primary_health(
         replication_count: usize,
         replay_lag: Option<&str>,
@@ -1232,57 +1163,24 @@ mod cluster_state_tests {
     }
 
     fn make_replica_health() -> ReplicaHealthCheckResult {
-        ReplicaHealthCheckResult {
-            timeline_id: 11,
-            wal_receiver: Some(WalReceiverInfo {
-                pid: 4053449,
-                status: "streaming".to_string(),
-                receive_start_lsn: "47F/67000000".to_string(),
-                receive_start_tli: 11,
-                written_lsn: "48F/6957B540".to_string(),
-                flushed_lsn: "48F/6957B540".to_string(),
-                received_tli: 11,
-                last_msg_send_time: Some(Utc::now()),
-                last_msg_receipt_time: Some(Utc::now()),
-                latest_end_lsn: "48F/6957B540".to_string(),
-                latest_end_time: Some(Utc::now()),
-                slot_name: None,
-                sender_host: "127.1.12.151".to_string(),
-                sender_port: 5432,
-                conninfo: "user=replicator host=127.1.12.151".to_string(),
-            }),
-            lag: LagInfo {
-                apply_lag_bytes: Some(0),
-                last_transaction_replay_at: Some(Utc::now()),
-            },
-            conflicts_by_db: HashMap::new(),
-            configuration: HashMap::new(),
-        }
+        ReplicaHealthBuilder::new().build()
     }
 
     fn make_node(id: u32, name: &str, role: Role) -> AnalyzedNode {
-        make_node_with_ip(id, name, role, Ipv4Addr::new(10, 81, 12, 151))
+        NodeBuilder::new(name).with_id(id).build_with_role(role)
     }
 
     fn make_node_with_ip(id: u32, name: &str, role: Role, ip_address: Ipv4Addr) -> AnalyzedNode {
-        AnalyzedNode {
-            id,
-            cluster_id: 33,
-            node_name: name.to_string(),
-            pg_version: "15.14".to_string(),
-            ip_address,
-            role,
-            errors: vec![],
-        }
+        NodeBuilder::new(name)
+            .with_id(id)
+            .with_ip(ip_address)
+            .build_with_role(role)
     }
 
     fn make_cluster(nodes: Vec<AnalyzedNode>) -> Cluster {
-        Cluster {
-            id: 33,
-            name: "dev-pg-app001".to_string(),
-            env: "dev".to_string(),
-            nodes,
-        }
+        ClusterBuilder::new("dev-pg-app001")
+            .with_nodes(nodes)
+            .build()
     }
 
     // ==================== Unknown state tests ====================
@@ -2097,6 +1995,71 @@ mod cluster_state_tests {
                 backup_progress: HashMap::new(),
             },
             reason: Reason::WritesUnprotected,
+        };
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_critical_archive_failure_never_succeeded() {
+        // Scenario: Primary with archive_mode=on but archiving has never succeeded
+        // archived_count=0 with failed_count > 0 means archive command never worked
+        let mut config = HashMap::new();
+        config.insert("archive_mode".to_string(), "on".to_string());
+        config.insert(
+            "archive_command".to_string(),
+            "/usr/bin/pgbackrest --stanza=dev-pg-app001 archive-push %p".to_string(),
+        );
+
+        let archiver = ArchiverStats {
+            archived_count: 0,
+            failed_count: 16452,
+            last_archived_wal: None,
+            last_archived_time: None,
+            last_failed_wal: Some("000000120000058300000073".to_string()),
+            last_failed_time: None,
+        };
+
+        let primary_health = PrimaryHealthBuilder::new()
+            .with_replication(2)
+            .with_config(config)
+            .with_archiver(archiver)
+            .build();
+
+        let cluster = make_cluster(vec![
+            make_node(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(primary_health),
+                },
+            ),
+            make_node(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+            ),
+            make_node(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+            ),
+        ]);
+
+        let actual = analyze(cluster.clone(), HashMap::new());
+        let expected = ClusterHealth::Critical {
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
+            reason: Reason::ArchiveFailure {
+                failed_count: 16452,
+                last_failed_wal: Some("000000120000058300000073".to_string()),
+            },
         };
 
         assert_eq!(actual, expected);
