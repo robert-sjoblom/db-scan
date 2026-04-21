@@ -14,7 +14,7 @@ use crate::{
     pipeline::PipelineContext,
     v2::{
         analyze::{AnalyzedCluster, ClusterHealth, Reason, SplitBrainInfo, SplitBrainResolution},
-        scan::health_check_primary::ReplicationConnection,
+        scan::{disk_check::DiskCheckOutcome, health_check_primary::ReplicationConnection},
     },
 };
 
@@ -57,6 +57,7 @@ pub(super) struct OutputRow {
     primary: String,
     replicas: String,
     lag: Option<u64>,
+    disk: String,
     reason: String,
     details_json: String,
 }
@@ -190,6 +191,7 @@ fn extract_row(health: &ClusterHealth, options: &WriterOptions) -> Option<Output
                 },
                 replicas,
                 lag: None,
+                disk: "-".to_string(),
                 reason: if *failover {
                     "Failover".to_string()
                 } else {
@@ -205,6 +207,7 @@ fn extract_row(health: &ClusterHealth, options: &WriterOptions) -> Option<Output
         } => {
             let (primary, replicas) = extract_primary_and_replicas(cluster);
             let (reason_str, details) = format_reason(reason);
+            let disk = extract_disk_info(cluster);
             log_degraded(cluster.name(), &reason_str, *lag);
             Some(OutputRow {
                 status: Status::Degraded,
@@ -212,6 +215,7 @@ fn extract_row(health: &ClusterHealth, options: &WriterOptions) -> Option<Output
                 primary: format_primary_with_failover(&primary, cluster),
                 replicas,
                 lag: Some(*lag),
+                disk,
                 reason: reason_str,
                 details_json: details,
             })
@@ -219,6 +223,7 @@ fn extract_row(health: &ClusterHealth, options: &WriterOptions) -> Option<Output
         ClusterHealth::Critical { cluster, reason } => {
             let (primary, replicas) = extract_primary_and_replicas_for_critical(cluster, reason);
             let (reason_str, details) = format_reason(reason);
+            let disk = extract_disk_info(cluster);
             log_critical(cluster.name(), reason, &reason_str);
             Some(OutputRow {
                 status: Status::Critical,
@@ -226,6 +231,7 @@ fn extract_row(health: &ClusterHealth, options: &WriterOptions) -> Option<Output
                 primary,
                 replicas,
                 lag: None,
+                disk,
                 reason: reason_str,
                 details_json: details,
             })
@@ -236,6 +242,7 @@ fn extract_row(health: &ClusterHealth, options: &WriterOptions) -> Option<Output
             reason,
         } => {
             let (reason_str, details) = format_reason(reason);
+            let disk = extract_disk_info(cluster);
             tracing::warn!(
                 cluster = %cluster.name(),
                 reachable_nodes = reachable_nodes,
@@ -248,6 +255,7 @@ fn extract_row(health: &ClusterHealth, options: &WriterOptions) -> Option<Output
                 primary: "-".to_string(),
                 replicas: format!("?/2 ({} reachable)", reachable_nodes),
                 lag: None,
+                disk,
                 reason: reason_str,
                 details_json: details,
             })
@@ -572,6 +580,57 @@ fn normalize_application_name(app_name: &str) -> String {
     app_name.to_string()
 }
 
+/// Extract disk check summary from cluster nodes
+fn extract_disk_info(cluster: &AnalyzedCluster) -> String {
+    let mut total_io = 0u32;
+    let mut total_fs = 0u32;
+    let mut total_block = 0u32;
+    let mut checked = 0;
+    let mut failed = 0;
+
+    for node in &cluster.cluster.nodes {
+        match &node.disk_check {
+            Some(DiskCheckOutcome::Checked(result)) => {
+                checked += 1;
+                total_io += result.io_errors;
+                total_fs += result.filesystem_errors;
+                total_block += result.block_errors;
+            }
+            Some(DiskCheckOutcome::Failed { .. }) => {
+                failed += 1;
+            }
+            None => {}
+        }
+    }
+
+    if checked == 0 && failed == 0 {
+        return "-".to_string();
+    }
+
+    let total_errors = total_io + total_fs + total_block;
+
+    if failed > 0 && checked == 0 {
+        return format!("check failed ({})", failed);
+    }
+
+    if total_errors == 0 {
+        return "ok".to_string();
+    }
+
+    let mut parts = Vec::new();
+    if total_io > 0 {
+        parts.push(format!("{}io", total_io));
+    }
+    if total_fs > 0 {
+        parts.push(format!("{}fs", total_fs));
+    }
+    if total_block > 0 {
+        parts.push(format!("{}blk", total_block));
+    }
+
+    parts.join(",")
+}
+
 /// Format reason enum to (short_string, json_details)
 fn format_reason(reason: &Reason) -> (String, String) {
     match reason {
@@ -679,6 +738,8 @@ fn build_terminal_output(rows: &[OutputRow], options: &WriterOptions) -> String 
         return "No clusters to display.".to_string();
     }
 
+    let has_disk_info = rows.iter().any(|r| r.disk != "-");
+
     let use_color = !options.no_color && std::io::stdout().is_terminal();
 
     // Calculate column widths
@@ -686,6 +747,7 @@ fn build_terminal_output(rows: &[OutputRow], options: &WriterOptions) -> String 
     let mut max_primary = "PRIMARY".len();
     let mut max_replicas = "REPLICAS".len();
     let mut max_lag = "LAG".len();
+    let mut max_disk = "DISK".len();
     let mut max_reason = "REASON".len();
 
     for row in rows {
@@ -693,6 +755,7 @@ fn build_terminal_output(rows: &[OutputRow], options: &WriterOptions) -> String 
         max_primary = max_primary.max(row.primary.len());
         max_replicas = max_replicas.max(row.replicas.len());
         max_lag = max_lag.max(format_lag(row.lag).len());
+        max_disk = max_disk.max(row.disk.len());
         max_reason = max_reason.max(row.reason.len());
     }
 
@@ -700,17 +763,19 @@ fn build_terminal_output(rows: &[OutputRow], options: &WriterOptions) -> String 
 
     // Header
     output.push_str(&format!(
-        "{:<8} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {}\n",
+        "{:<8} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {:<width_disk$} {}\n",
         "STATUS",
         "CLUSTER",
         "PRIMARY",
         "REPLICAS",
         "LAG",
+        "DISK",
         "REASON",
         width_cluster = max_cluster,
         width_primary = max_primary,
         width_replicas = max_replicas,
         width_lag = max_lag,
+        width_disk = max_disk,
     ));
 
     // Rows
@@ -734,19 +799,27 @@ fn build_terminal_output(rows: &[OutputRow], options: &WriterOptions) -> String 
         };
 
         output.push_str(&format!(
-            "{:<status_padding$} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {}\n",
+            "{:<status_padding$} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {:<width_disk$} {}\n",
             status_str,
             row.cluster,
             row.primary,
             row.replicas,
             format_lag(row.lag),
+            row.disk,
             row.reason,
             status_padding = status_padding,
             width_cluster = max_cluster,
             width_primary = max_primary,
             width_replicas = max_replicas,
             width_lag = max_lag,
+            width_disk = max_disk,
         ));
+    }
+
+    // Add disk legend if any disk info was shown
+    if has_disk_info {
+        output.push('\n');
+        output.push_str("DISK: io=I/O errors, fs=filesystem errors, blk=block device errors\n");
     }
 
     output
@@ -770,6 +843,7 @@ mod tests {
                 primary: "db001".to_string(),
                 replicas: "db002".to_string(),
                 lag: None,
+                disk: "-".to_string(),
                 reason: "NoPrimary".to_string(),
                 details_json: "{}".to_string(),
             },
@@ -779,6 +853,7 @@ mod tests {
                 primary: "db001".to_string(),
                 replicas: "db002".to_string(),
                 lag: None,
+                disk: "-".to_string(),
                 reason: "-".to_string(),
                 details_json: "{}".to_string(),
             },
@@ -788,6 +863,7 @@ mod tests {
                 primary: "db001".to_string(),
                 replicas: "db002".to_string(),
                 lag: Some(1000),
+                disk: "3io".to_string(),
                 reason: "HighReplicationLag".to_string(),
                 details_json: "{}".to_string(),
             },
@@ -797,6 +873,7 @@ mod tests {
                 primary: "db001".to_string(),
                 replicas: "db002".to_string(),
                 lag: None,
+                disk: "-".to_string(),
                 reason: "-".to_string(),
                 details_json: "{}".to_string(),
             },
@@ -806,6 +883,7 @@ mod tests {
                 primary: "-".to_string(),
                 replicas: "?/2 (1 reachable)".to_string(),
                 lag: None,
+                disk: "ok".to_string(),
                 reason: "NoNodesReachable".to_string(),
                 details_json: "{}".to_string(),
             },
@@ -815,6 +893,7 @@ mod tests {
                 primary: "db001".to_string(),
                 replicas: "-".to_string(),
                 lag: None,
+                disk: "-".to_string(),
                 reason: "WritesBlocked".to_string(),
                 details_json: "{}".to_string(),
             },

@@ -12,6 +12,7 @@ pub enum Stage {
     Scan,
     Clustering,
     Analyze,
+    DiskCheck,
     Write,
 }
 
@@ -21,6 +22,7 @@ impl std::fmt::Display for Stage {
             Stage::Prometheus => write!(f, "Prometheus"),
             Stage::DatabasePortal => write!(f, "Node Discovery"),
             Stage::Scan => write!(f, "Scan"),
+            Stage::DiskCheck => write!(f, "Disk Check"),
             Stage::Analyze => write!(f, "Analysis"),
             Stage::Write => write!(f, "Output"),
             Stage::Clustering => write!(f, "Clustering"),

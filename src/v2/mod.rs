@@ -313,6 +313,7 @@ pub(crate) mod tests_common {
                 ip_address: self.ip_address,
                 role: self.role,
                 errors: vec![],
+                disk_check: None,
             }
         }
 

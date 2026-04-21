@@ -74,6 +74,14 @@ pub(crate) struct DbScanConfig {
     /// Defaults to 60 seconds when flag is present without a value.
     #[arg(long, default_missing_value = "60", num_args = 0..=1)]
     pub(crate) watch: Option<u64>,
+
+    /// SSH user for disk health checks (e.g., "first_last" format)
+    #[arg(long, env = "SSH_USER")]
+    pub(crate) ssh_user: Option<String>,
+
+    /// Enable disk health checks via SSH on unhealthy nodes
+    #[arg(long)]
+    pub(crate) check_disks: bool,
 }
 
 impl DbScanConfig {
