@@ -126,6 +126,7 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
                     health: data.into(),
                 },
                 errors: vec![],
+                disk_check: None,
             }
         }
         Err(e) => {
@@ -139,6 +140,7 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
                 ip_address: node.ip_address,
                 role: Role::UnknownReplica,
                 errors: vec![e],
+                disk_check: None,
             }
         }
     };

@@ -18,7 +18,7 @@ use crate::{
         analyze::analyze_clusters,
         cluster::cluster_builder,
         node::Node,
-        scan::scan_nodes,
+        scan::{disk_check::enrich_with_disk_checks, scan_nodes},
         writer::{ScanResult, WriterOptions, write_results},
     },
 };
@@ -167,6 +167,9 @@ async fn run_scan(
         })
         .stage(Stage::Analyze, |ctx, rx, tx| {
             analyze_clusters(ctx.clone(), rx, tx)
+        })
+        .stage(Stage::DiskCheck, |ctx, rx, tx| {
+            enrich_with_disk_checks(ctx.clone(), rx, tx)
         })
         .sink(Stage::Write, |ctx, rx| write_results(ctx.clone(), rx))
         .run()

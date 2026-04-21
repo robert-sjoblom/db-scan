@@ -900,6 +900,18 @@ pub enum ClusterHealth {
     },
 }
 
+impl ClusterHealth {
+    /// Returns a reference to the analyzed cluster
+    pub fn cluster(&self) -> &AnalyzedCluster {
+        match self {
+            ClusterHealth::Healthy { cluster, .. }
+            | ClusterHealth::Degraded { cluster, .. }
+            | ClusterHealth::Critical { cluster, .. }
+            | ClusterHealth::Unknown { cluster, .. } => cluster,
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum Reason {
     // Degraded reasons

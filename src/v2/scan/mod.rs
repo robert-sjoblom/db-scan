@@ -10,10 +10,11 @@ use crate::{
     v2::{
         db::{self, DbError},
         node::Node,
-        scan::health_check_primary::PrimaryHealthCheckResult,
+        scan::{disk_check::DiskCheckOutcome, health_check_primary::PrimaryHealthCheckResult},
     },
 };
 
+pub mod disk_check;
 pub mod health_check_primary;
 pub mod health_check_replica;
 
@@ -86,6 +87,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
             ip_address: node.ip_address,
             role: Role::Unknown,
             errors: vec![e],
+            disk_check: None,
         }) {
             Ok(_) => {
                 tracing::trace!(node_name = %node.node_name, "sent analyzed node after connection failure")
@@ -108,6 +110,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                 ip_address: conn_node.ip_address,
                 role: Role::Unknown,
                 errors: vec![e.into()],
+                disk_check: None,
             }) {
                 Ok(_) => {
                     tracing::trace!(node_name = %conn_node.node_name, "sent analyzed node after connection error")
@@ -133,6 +136,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                 ip_address: node.ip_address,
                 role: Role::Unknown,
                 errors: vec![e],
+                disk_check: None,
             }) {
                 Ok(_) => {
                     tracing::trace!(node_name = %node_r.node_name, "sent node with unknown role")
@@ -190,6 +194,9 @@ pub struct AnalyzedNode {
     pub ip_address: Ipv4Addr,
     pub role: Role,
     pub errors: Vec<DbError>,
+    /// Disk health check result (only populated for unhealthy nodes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_check: Option<DiskCheckOutcome>,
 }
 
 impl AnalyzedNode {
