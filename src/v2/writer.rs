@@ -710,6 +710,27 @@ fn format_reason(reason: &Reason) -> (String, String) {
         }
         Reason::NoNodesReachable => ("NoNodesReachable".to_string(), "{}".to_string()),
         Reason::UnexpectedTopology => ("UnexpectedTopology".to_string(), "{}".to_string()),
+        Reason::DiskIoErrors {
+            node,
+            io_errors,
+            block_errors,
+        } => {
+            let short = format!(
+                "disk I/O errors on {} (io={}, blk={})",
+                extract_db_number(node),
+                io_errors,
+                block_errors
+            );
+            (short, "{}".to_string())
+        }
+        Reason::FilesystemErrors { node, count } => {
+            let short = format!(
+                "filesystem errors on {} ({})",
+                extract_db_number(node),
+                count
+            );
+            (short, "{}".to_string())
+        }
     }
 }
 

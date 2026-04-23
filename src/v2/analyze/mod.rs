@@ -60,7 +60,8 @@ fn analyze_with_enrichment(
     batch_data: &HashMap<Ip, FileSystemMetrics>,
 ) -> ClusterHealth {
     let progress = calculate_backup_progress(&cluster, batch_data);
-    analyze(cluster, progress)
+    let health = analyze(cluster, progress);
+    apply_disk_verdict(health)
 }
 
 #[instrument(skip_all, level = "debug", fields(
@@ -800,6 +801,80 @@ fn resolve_split_brain(primaries: &[&AnalyzedNode], replicas: &[&AnalyzedNode]) 
     determine_true_primary(timeline_info, replicas_following)
 }
 
+/// Inspect disk_check results on each node and upgrade ClusterHealth if warranted.
+///
+/// Rules (in priority order):
+/// - Unknown and Critical (pg-based): left unchanged
+/// - Any node has filesystem_errors > 0: upgrade to Critical { FilesystemErrors }
+/// - Any node has io/block errors, and current health is Healthy: upgrade to Degraded { DiskIoErrors }
+fn apply_disk_verdict(health: ClusterHealth) -> ClusterHealth {
+    use crate::v2::scan::disk_check::DiskCheckOutcome;
+
+    if matches!(
+        health,
+        ClusterHealth::Unknown { .. } | ClusterHealth::Critical { .. }
+    ) {
+        return health;
+    }
+
+    let (worst_fs, worst_io) = {
+        let cluster_ref = health.cluster();
+        let mut worst_fs: Option<(String, u32)> = None;
+        let mut worst_io: Option<(String, u32, u32)> = None;
+
+        for node in &cluster_ref.cluster.nodes {
+            if let Some(DiskCheckOutcome::Checked(result)) = &node.disk_check {
+                if result.filesystem_errors > 0 {
+                    if worst_fs
+                        .as_ref()
+                        .map_or(true, |(_, c)| result.filesystem_errors > *c)
+                    {
+                        worst_fs = Some((node.node_name.clone(), result.filesystem_errors));
+                    }
+                } else if result.io_errors > 0 || result.block_errors > 0 {
+                    worst_io.get_or_insert((
+                        node.node_name.clone(),
+                        result.io_errors,
+                        result.block_errors,
+                    ));
+                }
+            }
+        }
+        (worst_fs, worst_io)
+    };
+
+    if worst_fs.is_none() && worst_io.is_none() {
+        return health;
+    }
+
+    if let Some((node, count)) = worst_fs {
+        let cluster = match health {
+            ClusterHealth::Healthy { cluster, .. } => cluster,
+            ClusterHealth::Degraded { cluster, .. } => cluster,
+            _ => return health,
+        };
+        return ClusterHealth::Critical {
+            cluster,
+            reason: Reason::FilesystemErrors { node, count },
+        };
+    }
+
+    if let ClusterHealth::Healthy { cluster, .. } = health {
+        let (node, io_errors, block_errors) = worst_io.unwrap();
+        return ClusterHealth::Degraded {
+            lag: 0,
+            cluster,
+            reason: Reason::DiskIoErrors {
+                node,
+                io_errors,
+                block_errors,
+            },
+        };
+    }
+
+    health
+}
+
 /// Calculate byte difference between two PostgreSQL LSNs
 /// LSN format: "XXX/YYYYYYYY" where both parts are hexadecimal
 /// Returns None if LSNs are invalid
@@ -947,6 +1022,19 @@ pub enum Reason {
     NoNodesReachable,
     /// Cluster has unexpected topology (e.g., more than 3 nodes)
     UnexpectedTopology,
+
+    // Disk reasons (from dmesg within the recency window)
+    /// I/O or block-device errors found in dmesg
+    DiskIoErrors {
+        node: String,
+        io_errors: u32,
+        block_errors: u32,
+    },
+    /// Filesystem-level errors found in dmesg
+    FilesystemErrors {
+        node: String,
+        count: u32,
+    },
 }
 
 /// Information about a split-brain scenario and its resolution
@@ -2184,6 +2272,285 @@ mod cluster_state_tests {
         );
 
         assert!(!is_sync_commit_off(&node));
+    }
+
+    // ==================== Disk verdict promotion tests ====================
+
+    fn make_node_with_disk(
+        id: u32,
+        name: &str,
+        role: Role,
+        disk: Option<crate::v2::scan::disk_check::DiskCheckOutcome>,
+    ) -> AnalyzedNode {
+        let mut n = NodeBuilder::new(name).with_id(id).build_with_role(role);
+        n.disk_check = disk;
+        n
+    }
+
+    fn checked(
+        io: u32,
+        fs: u32,
+        blk: u32,
+    ) -> Option<crate::v2::scan::disk_check::DiskCheckOutcome> {
+        use crate::v2::scan::disk_check::{DiskCheckOutcome, DiskCheckResult};
+        Some(DiskCheckOutcome::Checked(DiskCheckResult {
+            io_errors: io,
+            filesystem_errors: fs,
+            block_errors: blk,
+            sample_messages: vec![],
+        }))
+    }
+
+    #[test]
+    fn disk_healthy_cluster_with_io_errors_becomes_degraded() {
+        let cluster = make_cluster(vec![
+            make_node_with_disk(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(make_primary_health(2, None)),
+                },
+                checked(2, 0, 1),
+            ),
+            make_node_with_disk(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+                checked(0, 0, 0),
+            ),
+            make_node_with_disk(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+                checked(0, 0, 0),
+            ),
+        ]);
+
+        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        assert!(
+            matches!(
+                &health,
+                ClusterHealth::Degraded {
+                    reason: Reason::DiskIoErrors {
+                        io_errors: 2,
+                        block_errors: 1,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected Degraded DiskIoErrors, got {health:?}"
+        );
+    }
+
+    #[test]
+    fn disk_healthy_cluster_with_filesystem_errors_becomes_critical() {
+        let cluster = make_cluster(vec![
+            make_node_with_disk(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(make_primary_health(2, None)),
+                },
+                checked(0, 3, 0),
+            ),
+            make_node_with_disk(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+                checked(0, 0, 0),
+            ),
+            make_node_with_disk(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+                checked(0, 0, 0),
+            ),
+        ]);
+
+        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        assert!(
+            matches!(
+                &health,
+                ClusterHealth::Critical {
+                    reason: Reason::FilesystemErrors { count: 3, .. },
+                    ..
+                }
+            ),
+            "expected Critical FilesystemErrors, got {health:?}"
+        );
+    }
+
+    #[test]
+    fn disk_degraded_cluster_with_filesystem_errors_upgrades_to_critical() {
+        // Cluster is already Degraded (one replica down) + filesystem errors → Critical
+        let cluster = make_cluster(vec![
+            make_node_with_disk(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(make_primary_health(1, None)),
+                },
+                checked(0, 2, 0),
+            ),
+            make_node_with_disk(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+                checked(0, 0, 0),
+            ),
+            make_node_with_disk(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Unknown,
+                None,
+            ),
+        ]);
+
+        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        assert!(
+            matches!(
+                &health,
+                ClusterHealth::Critical {
+                    reason: Reason::FilesystemErrors { count: 2, .. },
+                    ..
+                }
+            ),
+            "expected Critical FilesystemErrors, got {health:?}"
+        );
+    }
+
+    #[test]
+    fn disk_degraded_cluster_with_only_io_errors_stays_degraded_with_pg_reason() {
+        // Cluster is already Degraded (one replica down) + only io errors → still Degraded (pg reason)
+        let cluster = make_cluster(vec![
+            make_node_with_disk(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(make_primary_health(1, None)),
+                },
+                checked(5, 0, 2),
+            ),
+            make_node_with_disk(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+                checked(0, 0, 0),
+            ),
+            make_node_with_disk(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Unknown,
+                None,
+            ),
+        ]);
+
+        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        assert!(
+            matches!(
+                &health,
+                ClusterHealth::Degraded {
+                    reason: Reason::OneReplicaDown,
+                    ..
+                }
+            ),
+            "expected Degraded OneReplicaDown (pg reason preserved), got {health:?}"
+        );
+    }
+
+    #[test]
+    fn disk_critical_cluster_pg_reason_is_preserved() {
+        // Cluster is already Critical (no primary) → filesystem errors don't change the reason
+        let cluster = make_cluster(vec![
+            make_node_with_disk(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+                checked(0, 5, 0),
+            ),
+            make_node_with_disk(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+                checked(0, 0, 0),
+            ),
+            make_node_with_disk(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+                checked(0, 0, 0),
+            ),
+        ]);
+
+        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        assert!(
+            matches!(
+                &health,
+                ClusterHealth::Critical {
+                    reason: Reason::NoPrimary,
+                    ..
+                }
+            ),
+            "expected Critical NoPrimary (pg reason preserved), got {health:?}"
+        );
+    }
+
+    #[test]
+    fn disk_failed_outcome_does_not_affect_verdict() {
+        use crate::v2::scan::disk_check::DiskCheckOutcome;
+        let cluster = make_cluster(vec![
+            make_node_with_disk(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(make_primary_health(2, None)),
+                },
+                Some(DiskCheckOutcome::Failed {
+                    reason: "SSH timeout".to_string(),
+                }),
+            ),
+            make_node_with_disk(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+                None,
+            ),
+            make_node_with_disk(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+                None,
+            ),
+        ]);
+
+        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        assert!(
+            matches!(&health, ClusterHealth::Healthy { .. }),
+            "expected Healthy (failed disk check ignored), got {health:?}"
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ use tokio_postgres::Client;
 use tracing::instrument;
 
 use crate::{
+    config::get_config,
     pipeline::PipelineContext,
     v2::{
         db::{self, DbError},
@@ -35,7 +36,19 @@ pub async fn scan_nodes(
 #[instrument(skip(tx), level = "debug", fields(node_name = %node.node_name, node_id = node.id))]
 async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
     let node = Arc::from(node);
+    let config = get_config();
     tracing::info!("starting node scan");
+
+    // Start disk check in parallel if enabled — runs concurrently with PG health check
+    let mut disk_check_handle = if config.check_disks && config.ssh_user.is_some() {
+        let n = node.clone();
+        let user = config.ssh_user.clone().unwrap();
+        Some(tokio::spawn(async move {
+            disk_check::check_disk_health(&n, &user).await
+        }))
+    } else {
+        None
+    };
 
     // Retry connection up to 3 times (initial attempt + 2 retries)
     let mut last_error = None;
@@ -79,6 +92,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
 
         // If we get here, all retries failed
         let e = last_error.unwrap();
+        let disk_check = collect_disk_check(disk_check_handle.take()).await;
         match tx.send(AnalyzedNode {
             id: node.id,
             cluster_id: node.cluster_id,
@@ -87,7 +101,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
             ip_address: node.ip_address,
             role: Role::Unknown,
             errors: vec![e],
-            disk_check: None,
+            disk_check,
         }) {
             Ok(_) => {
                 tracing::trace!(node_name = %node.node_name, "sent analyzed node after connection failure")
@@ -122,12 +136,11 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
         }
     });
 
-    let mut handles = Vec::new();
-
     let primary = match is_primary(&client).await {
         Ok(r) => r,
         Err(e) => {
             let node_r = node.clone();
+            let disk_check = collect_disk_check(disk_check_handle.take()).await;
             return match tx.send(AnalyzedNode {
                 id: node.id,
                 cluster_id: node.cluster_id,
@@ -136,7 +149,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                 ip_address: node.ip_address,
                 role: Role::Unknown,
                 errors: vec![e],
-                disk_check: None,
+                disk_check,
             }) {
                 Ok(_) => {
                     tracing::trace!(node_name = %node_r.node_name, "sent node with unknown role")
@@ -148,23 +161,34 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
         }
     };
 
+    // Use an intermediate channel so we can patch the disk_check result in before forwarding
+    let (hc_tx, mut hc_rx) = tokio::sync::mpsc::unbounded_channel::<AnalyzedNode>();
+    let node_name = node.node_name.clone();
+
     if primary {
-        tracing::trace!(node_name = %node.node_name, role = "primary", "spawning health check task");
-        handles.push(tokio::spawn(async move {
-            health_check_primary::check(client, node, tx).await
-        }));
+        tracing::trace!(node_name = %node_name, role = "primary", "spawning health check task");
+        tokio::spawn(async move { health_check_primary::check(client, node, hc_tx).await });
     } else {
-        tracing::trace!(node_name = %node.node_name, role = "replica", "spawning health check task");
-        handles.push(tokio::spawn(async move {
-            health_check_replica::check(client, node, tx).await
-        }));
+        tracing::trace!(node_name = %node_name, role = "replica", "spawning health check task");
+        tokio::spawn(async move { health_check_replica::check(client, node, hc_tx).await });
     }
 
-    // Wait for all health check tasks to complete
-    for handle in handles {
-        if let Err(e) = handle.await {
-            tracing::error!(error = %e, "health check task failed");
+    // Await disk check concurrently with health check, then forward result
+    let disk_check = collect_disk_check(disk_check_handle.take()).await;
+    if let Some(mut analyzed_node) = hc_rx.recv().await {
+        analyzed_node.disk_check = disk_check;
+        if tx.send(analyzed_node).is_err() {
+            tracing::error!(node_name = %node_name, "failed to send analyzed node");
         }
+    }
+}
+
+async fn collect_disk_check(
+    handle: Option<tokio::task::JoinHandle<DiskCheckOutcome>>,
+) -> Option<DiskCheckOutcome> {
+    match handle {
+        None => None,
+        Some(h) => h.await.ok(),
     }
 }
 
@@ -194,7 +218,7 @@ pub struct AnalyzedNode {
     pub ip_address: Ipv4Addr,
     pub role: Role,
     pub errors: Vec<DbError>,
-    /// Disk health check result (only populated for unhealthy nodes)
+    /// Disk health check result (populated for all nodes when --check-disks is set)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_check: Option<DiskCheckOutcome>,
 }
