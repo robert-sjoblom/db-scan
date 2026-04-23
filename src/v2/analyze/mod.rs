@@ -827,7 +827,7 @@ fn apply_disk_verdict(health: ClusterHealth) -> ClusterHealth {
                 if result.filesystem_errors > 0 {
                     if worst_fs
                         .as_ref()
-                        .map_or(true, |(_, c)| result.filesystem_errors > *c)
+                        .is_none_or(|(_, c)| result.filesystem_errors > *c)
                     {
                         worst_fs = Some((node.node_name.clone(), result.filesystem_errors));
                     }
