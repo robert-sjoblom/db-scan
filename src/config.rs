@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::OnceLock};
 
 use clap::Parser;
 use redact::Secret;
+use regex_lite::Regex;
 use tracing_subscriber::EnvFilter;
 
 pub(crate) static CONFIG: OnceLock<DbScanConfig> = OnceLock::new();
@@ -34,9 +35,9 @@ pub(crate) struct DbScanConfig {
     #[arg(long, env = "PGSSLROOTCERT")]
     pub(crate) pgsslrootcert: PathBuf,
 
-    /// Cluster to scan
-    #[arg(short, long)]
-    pub(crate) cluster: Option<String>,
+    /// Cluster to scan (regex)
+    #[arg(short, long, value_parser = parse_cluster_regex)]
+    pub(crate) cluster: Option<Regex>,
 
     /// Log level
     #[arg(short, long, env = "RUST_LOG", default_value = "info")]
@@ -89,11 +90,15 @@ pub(crate) struct DbScanConfig {
     pub(crate) disk_check_window_minutes: u64,
 }
 
+fn parse_cluster_regex(s: &str) -> Result<Regex, regex_lite::Error> {
+    Regex::new(s)
+}
+
 impl DbScanConfig {
     pub(crate) fn cluster_pattern(&self) -> String {
         self.cluster
             .as_ref()
-            .map(|s| format!("{s}.*"))
+            .map(|r| r.as_str().to_string())
             .unwrap_or_else(|| ".*-(pg|ts)-.*".to_string())
     }
 }

@@ -210,18 +210,30 @@ async fn filter_nodes(
     for node in nodes
         .into_iter()
         .filter(|n| {
-            // First, check CLI --cluster flag (substring match)
             let passes_cli_filter = match &get_config().cluster {
-                Some(cluster) => n.cluster_name().contains(cluster),
+                Some(re) => {
+                    let matches = re.is_match(&n.cluster_name());
+                    tracing::debug!(
+                        cluster_name = %n.cluster_name(),
+                        pattern = re.as_str(),
+                        matches,
+                        "cli filter"
+                    );
+                    matches
+                }
                 None => true,
             };
             if !passes_cli_filter {
                 return false;
             }
 
-            // Then, check watch mode cluster filter (exact match)
+            // Watch mode cluster filter (exact match)
             match &cluster_filter {
-                Some(filter) => filter.contains(&n.cluster_name()),
+                Some(filter) => {
+                    let matches = filter.contains(&n.cluster_name());
+                    tracing::debug!(cluster_name = %n.cluster_name(), matches, "watch filter");
+                    matches
+                }
                 None => true,
             }
         })
