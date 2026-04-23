@@ -82,6 +82,11 @@ pub(crate) struct DbScanConfig {
     /// Enable disk health checks via SSH on unhealthy nodes
     #[arg(long)]
     pub(crate) check_disks: bool,
+
+    /// Recency window in minutes for dmesg entries to count against health.
+    /// Older entries are ignored.
+    #[arg(long, env = "DISK_CHECK_WINDOW_MINUTES", default_value = "60")]
+    pub(crate) disk_check_window_minutes: u64,
 }
 
 impl DbScanConfig {
