@@ -67,6 +67,7 @@ pub(crate) mod tests_common {
         timeline_id: i32,
         archiver: ArchiverStats,
         replication_slots: Vec<ReplicationSlot>,
+        sync_state: PgSyncSettings,
     }
 
     impl PrimaryHealthBuilder {
@@ -85,7 +86,13 @@ pub(crate) mod tests_common {
                     last_failed_time: None,
                 },
                 replication_slots: vec![],
+                sync_state: PgSyncSettings::Quorum,
             }
+        }
+
+        pub fn with_sync_state(mut self, sync_state: PgSyncSettings) -> Self {
+            self.sync_state = sync_state;
+            self
         }
 
         pub fn with_replication(mut self, count: usize) -> Self {
@@ -147,7 +154,7 @@ pub(crate) mod tests_common {
                     flush_lag: Some("00:00:00.000895".to_string()),
                     replay_lag: self.replay_lag.clone(),
                     sync_priority: 1,
-                    sync_state: PgSyncSettings::Quorum,
+                    sync_state: self.sync_state.clone(),
                     reply_time: Some(Utc::now()),
                 })
                 .collect();

@@ -8,7 +8,7 @@ use crate::{
     prometheus::FileSystemMetrics,
     v2::{
         cluster::Cluster,
-        scan::{AnalyzedNode, Role},
+        scan::{AnalyzedNode, Role, health_check_primary::PgSyncSettings},
     },
 };
 
@@ -225,17 +225,21 @@ fn analyze(cluster: Cluster, backup_progress: HashMap<String, u16>) -> ClusterHe
     // Pre-compute sync_commit status for no-replicas case (avoids borrow issues)
     let sync_commit_off = is_sync_commit_off(primary);
 
+    // Replicas whose sync_state is not Quorum (we require quorum for all streaming replicas)
+    let non_quorum_replicas = find_non_quorum_replicas(primary);
+
+    let signals = ClusterSignals {
+        failover,
+        max_lag,
+        rebuilding_count,
+        chained_replica,
+        sync_commit_off,
+        non_quorum_replicas,
+    };
+
     // Determine health based on replica count and lag
     match replicas.len() {
-        2 => analyze_full_redundancy(
-            cluster,
-            backup_progress,
-            failover,
-            max_lag,
-            rebuilding_count,
-            chained_replica,
-            sync_commit_off,
-        ),
+        2 => analyze_full_redundancy(cluster, backup_progress, signals),
         1 => analyze_one_replica_down(cluster, backup_progress, max_lag),
         0 => analyze_no_replicas(cluster, backup_progress, sync_commit_off),
         _ => ClusterHealth::Unknown {
@@ -249,18 +253,33 @@ fn analyze(cluster: Cluster, backup_progress: HashMap<String, u16>) -> ClusterHe
     }
 }
 
+/// Pre-computed signals fed into the per-topology analyzers.
+struct ClusterSignals {
+    failover: bool,
+    max_lag: u64,
+    rebuilding_count: usize,
+    chained_replica: Option<ChainedReplicaInfo>,
+    sync_commit_off: bool,
+    non_quorum_replicas: Vec<String>,
+}
+
 /// Analyze a cluster with full redundancy (2 replicas visible).
 ///
 /// Returns Healthy if all conditions are met, otherwise Degraded with appropriate reason.
 fn analyze_full_redundancy(
     cluster: Cluster,
     backup_progress: HashMap<String, u16>,
-    failover: bool,
-    max_lag: u64,
-    rebuilding_count: usize,
-    chained_replica: Option<ChainedReplicaInfo>,
-    sync_commit_off: bool,
+    signals: ClusterSignals,
 ) -> ClusterHealth {
+    let ClusterSignals {
+        failover,
+        max_lag,
+        rebuilding_count,
+        chained_replica,
+        sync_commit_off,
+        non_quorum_replicas,
+    } = signals;
+
     // If ALL replicas are not streaming AND sync replication is disabled,
     // writes are unprotected - this is Critical, not just Degraded
     if rebuilding_count == 2 && sync_commit_off {
@@ -307,6 +326,19 @@ fn analyze_full_redundancy(
             reason: Reason::ChainedReplica {
                 chained_replica: chained.chained_replica,
                 upstream_replica: chained.upstream_replica,
+            },
+        };
+    }
+
+    if !non_quorum_replicas.is_empty() {
+        return ClusterHealth::Degraded {
+            lag: max_lag,
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress,
+            },
+            reason: Reason::NotInQuorum {
+                replicas: non_quorum_replicas,
             },
         };
     }
@@ -461,6 +493,19 @@ fn is_sync_commit_off(primary: &AnalyzedNode) -> bool {
     } else {
         false
     }
+}
+
+/// Returns application_names of replicas whose sync_state is not Quorum.
+fn find_non_quorum_replicas(primary: &AnalyzedNode) -> Vec<String> {
+    let Role::Primary { health } = &primary.role else {
+        return Vec::new();
+    };
+    health
+        .replication
+        .iter()
+        .filter(|conn| !matches!(conn.sync_state, PgSyncSettings::Quorum))
+        .map(|conn| conn.application_name.clone())
+        .collect()
 }
 
 /// Information about a chained replica
@@ -1000,6 +1045,11 @@ pub enum Reason {
         chained_replica: String,
         /// The upstream replica it's replicating from
         upstream_replica: String,
+    },
+    /// One or more streaming replicas have a sync_state other than `quorum`
+    NotInQuorum {
+        /// application_name of each replica whose sync_state is not Quorum
+        replicas: Vec<String>,
     },
 
     // Critical reasons
@@ -2163,6 +2213,110 @@ mod cluster_state_tests {
         };
 
         assert_eq!(actual, expected);
+    }
+
+    // ==================== NotInQuorum tests ====================
+
+    #[test]
+    fn test_degraded_when_replicas_are_async_with_empty_standby_names() {
+        // Mirrors the real dump: synchronous_commit=on, synchronous_standby_names="",
+        // both replicas streaming with sync_state=async. Cluster must be Degraded.
+        let mut config = HashMap::new();
+        config.insert("synchronous_commit".to_string(), "on".to_string());
+        config.insert("synchronous_standby_names".to_string(), "".to_string());
+
+        let primary_health = PrimaryHealthBuilder::new()
+            .with_replication(2)
+            .with_config(config)
+            .with_sync_state(PgSyncSettings::Async)
+            .build();
+
+        let cluster = make_cluster(vec![
+            make_node(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(primary_health),
+                },
+            ),
+            make_node(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+            ),
+            make_node(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+            ),
+        ]);
+
+        let actual = analyze(cluster.clone(), HashMap::new());
+        let expected = ClusterHealth::Degraded {
+            lag: 0,
+            cluster: AnalyzedCluster {
+                cluster,
+                backup_progress: HashMap::new(),
+            },
+            reason: Reason::NotInQuorum {
+                replicas: vec![
+                    "dev_pg_app001_db002".to_string(),
+                    "dev_pg_app001_db003".to_string(),
+                ],
+            },
+        };
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_degraded_when_one_replica_is_potential() {
+        // Only one of the two replicas is in Quorum; the other is Potential.
+        // Strict policy: any non-quorum replica → Degraded.
+        let primary_health = PrimaryHealthBuilder::new()
+            .with_replication(2)
+            .with_sync_state(PgSyncSettings::Potential)
+            .build();
+
+        let cluster = make_cluster(vec![
+            make_node(
+                1,
+                "dev-pg-app001-db001.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(primary_health),
+                },
+            ),
+            make_node(
+                2,
+                "dev-pg-app001-db002.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+            ),
+            make_node(
+                3,
+                "dev-pg-app001-db003.sto3.example.com",
+                Role::Replica {
+                    health: Box::new(make_replica_health()),
+                },
+            ),
+        ]);
+
+        let actual = analyze(cluster.clone(), HashMap::new());
+        assert!(
+            matches!(
+                actual,
+                ClusterHealth::Degraded {
+                    reason: Reason::NotInQuorum { .. },
+                    ..
+                }
+            ),
+            "expected Degraded NotInQuorum, got {actual:?}"
+        );
     }
 
     // ==================== is_sync_commit_off helper tests ====================

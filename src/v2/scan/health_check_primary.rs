@@ -12,36 +12,30 @@ use crate::v2::{
     scan::{AnalyzedNode, Role},
 };
 
-/// PostgreSQL synchronous commit settings
+/// Per-replica replication state from `pg_stat_replication.sync_state`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PgSyncSettings {
-    /// One of the standby names must acknowledge writes
+    /// Replica is part of the synchronous quorum
     Quorum,
-    /// One of the standby names must confirm receipt of WAL (flush to durable storage)
-    On,
-    /// One of the standby names must confirm receipt of WAL written to disk
-    RemoteWrite,
-    /// Wait for local flush to disk, but not for replication
-    Local,
-    /// NO guarantees -- returns immediately
-    Off,
-    /// Async replication (from pg_stat_replication.sync_state)
+    /// Replica is the single designated synchronous standby
+    Sync,
+    /// Replica would become sync/quorum if a higher-priority one drops
+    Potential,
+    /// Replica is asynchronous - primary does not wait for it before acking writes
     Async,
 }
 
 impl From<String> for PgSyncSettings {
     fn from(value: String) -> Self {
         match value.as_str() {
-            "remote_apply" => PgSyncSettings::Quorum,
-            "on" => PgSyncSettings::On,
-            "remote_write" => PgSyncSettings::RemoteWrite,
-            "local" => PgSyncSettings::Local,
-            "off" => PgSyncSettings::Off,
+            "quorum" => PgSyncSettings::Quorum,
+            "sync" => PgSyncSettings::Sync,
+            "potential" => PgSyncSettings::Potential,
             "async" => PgSyncSettings::Async,
             _ => {
-                tracing::warn!(value = %value, "unknown synchronous_commit setting, defaulting to off");
-                PgSyncSettings::Off
+                tracing::warn!(value = %value, "unknown pg_stat_replication.sync_state, defaulting to async");
+                PgSyncSettings::Async
             }
         }
     }
