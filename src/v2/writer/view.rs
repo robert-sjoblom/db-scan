@@ -17,7 +17,7 @@ pub(crate) enum Status {
 }
 
 impl Status {
-    pub(crate) fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Status::Critical => "CRITICAL",
             Status::Degraded => "DEGRADED",
@@ -26,7 +26,7 @@ impl Status {
         }
     }
 
-    pub(crate) fn color(&self) -> &'static str {
+    pub(crate) fn color(self) -> &'static str {
         match self {
             Status::Critical => "\x1b[31m",
             Status::Degraded => "\x1b[33m",
@@ -65,8 +65,8 @@ pub(crate) enum PrimaryView {
 impl PrimaryView {
     pub(crate) fn render(&self, mode: RenderMode) -> String {
         match self {
-            PrimaryView::None => "(none)".to_string(),
-            PrimaryView::Dash => "-".to_string(),
+            PrimaryView::None => "(none)".to_owned(),
+            PrimaryView::Dash => "-".to_owned(),
             PrimaryView::Single(node) => node.render(mode),
             PrimaryView::SplitBrain {
                 true_primary,
@@ -103,17 +103,17 @@ pub(crate) enum ReplicasView {
     Unknown {
         reachable: u32,
     },
-    /// (replica_node, true_primary_node) pairs for split-brain following display.
+    /// (`replica_node`, `true_primary_node`) pairs for split-brain following display.
     SplitBrainFollowing(Vec<(NodeView, NodeView)>),
 }
 
 impl ReplicasView {
     pub(crate) fn render(&self, mode: RenderMode) -> String {
         match self {
-            ReplicasView::None => "-".to_string(),
+            ReplicasView::None => "-".to_owned(),
             ReplicasView::List(replicas) => {
                 if replicas.is_empty() {
-                    return "-".to_string();
+                    return "-".to_owned();
                 }
                 replicas
                     .iter()
@@ -124,7 +124,7 @@ impl ReplicasView {
             ReplicasView::Unknown { reachable } => format!("?/2 ({} reachable)", reachable),
             ReplicasView::SplitBrainFollowing(pairs) => {
                 if pairs.is_empty() {
-                    return "-".to_string();
+                    return "-".to_owned();
                 }
                 pairs
                     .iter()

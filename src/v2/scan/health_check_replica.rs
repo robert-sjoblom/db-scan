@@ -7,7 +7,7 @@ use tokio_postgres::Client;
 use tracing::instrument;
 
 use crate::v2::{
-    db::DbError,
+    db::db_error::DbError,
     node::Node,
     scan::{AnalyzedNode, Role},
 };
@@ -148,11 +148,11 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
     tracing::trace!(result = ?analyzed, "Replica health check raw result");
 
     match tx.send(analyzed) {
-        Ok(_) => tracing::trace!(node_name = %node.node_name, "health checked replica node"),
+        Ok(()) => tracing::trace!(node_name = %node.node_name, "health checked replica node"),
         Err(e) => {
-            tracing::error!(node_name = %node.node_name, error = %e, "failed to send health checked replica node")
+            tracing::error!(node_name = %node.node_name, error = %e, "failed to send health checked replica node");
         }
-    };
+    }
 }
 
 #[instrument(skip(client), level = "trace")]

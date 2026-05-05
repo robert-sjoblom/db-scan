@@ -19,6 +19,7 @@ pub mod client {
         models::{PrometheusResponse, Query},
     };
 
+    #[expect(clippy::cfg_not_test, reason = "feature gated url")]
     #[cfg(not(test))]
     const PROMETHEUS_URL: &str = match option_env!("PROMETHEUS_URL") {
         Some(url) => url,
@@ -28,8 +29,8 @@ pub mod client {
     #[cfg(test)]
     const PROMETHEUS_URL: &str = "https://prometheus.example.com";
 
-    pub async fn get_batch_filesystem_data(
-        hostname: impl AsRef<str>,
+    pub async fn get_batch_filesystem_data<T: AsRef<str>>(
+        hostname: T,
     ) -> HashMap<String, FileSystemMetrics> {
         let http_client = match create_client() {
             Ok(c) => c,
@@ -39,7 +40,7 @@ pub mod client {
             }
         };
 
-        _get_batch_filesystem_data(hostname.as_ref(), &http_client)
+        batch_filesystem_data(hostname.as_ref(), &http_client)
             .await
             .inspect_err(
                 |e| tracing::warn!(error = %e, "failed to fetch batch data from prometheus"),
@@ -51,13 +52,15 @@ pub mod client {
     type Bytes = u64;
 
     #[tracing::instrument(level = "info", skip(client), fields(hostname = %hostname))]
-    async fn _get_batch_filesystem_data(
+    async fn batch_filesystem_data(
         hostname: &str,
         client: &ClientWithMiddleware,
     ) -> anyhow::Result<HashMap<String, FileSystemMetrics>> {
         let (size_result, avail_result) = tokio::join!(
-            client.get(build_query(hostname, Query::SizeBytes)?).send(),
-            client.get(build_query(hostname, Query::AvailBytes)?).send()
+            client.get(build_query(hostname, &Query::SizeBytes)?).send(),
+            client
+                .get(build_query(hostname, &Query::AvailBytes)?)
+                .send()
         );
 
         let size_result: PrometheusResponse = size_result?.json().await?;
@@ -118,7 +121,7 @@ pub mod client {
         Ok(map)
     }
 
-    /// Create a default HTTP client for Prometheus queries
+    /// Create a default HTTP client for Prometheus queries.
     ///
     /// Returns a client with a 5 second timeout. Use this to create a shared
     /// client when making multiple Prometheus queries.
@@ -131,7 +134,7 @@ pub mod client {
         .build())
     }
 
-    fn build_query(host: &str, query: Query) -> anyhow::Result<Url> {
+    fn build_query(host: &str, query: &Query) -> anyhow::Result<Url> {
         let base_url = format!("{}/api/v1/query", PROMETHEUS_URL);
         Ok(Url::parse_with_params(
             &base_url,
@@ -147,13 +150,13 @@ pub mod client {
 
         #[test]
         fn test_build_size_query() {
-            let url = build_query("prod-pg-app001", Query::AvailBytes).unwrap();
+            let url = build_query("prod-pg-app001", &Query::AvailBytes).unwrap();
 
             assert_eq!(url.scheme(), "https");
             assert_eq!(url.host_str(), Some("prometheus.example.com"));
             assert_eq!(url.path(), "/api/v1/query");
 
-            let query_param = url.query_pairs().find(|(k, _)| k == "query");
+            let query_param = url.query_pairs().find(|&(ref k, _)| k == "query");
             assert!(query_param.is_some(), "query parameter not found");
 
             let promql = query_param.unwrap().1;
@@ -178,7 +181,7 @@ pub mod client {
                 VCRMode::Replay,
             );
 
-            let result = _get_batch_filesystem_data("dev-pg-app001.*", &client).await;
+            let result = batch_filesystem_data("dev-pg-app001.*", &client).await;
 
             assert!(
                 result.is_ok(),
@@ -196,6 +199,10 @@ pub mod client {
             assert!(filesystem_map.contains_key("127.2.12.151"));
             assert!(filesystem_map.contains_key("127.1.12.151"));
 
+            #[expect(
+                clippy::iter_over_hash_type,
+                reason = "Order doesn't matter for this iteration"
+            )]
             // Verify each entry has reasonable values
             for (ip, metrics) in &filesystem_map {
                 assert!(
@@ -243,9 +250,10 @@ pub mod client {
 
     use crate::prometheus::FileSystemMetrics;
 
-    /// Stub implementation of function when prometheus feature is disabled
-    pub async fn get_batch_filesystem_data(
-        _hostname: impl AsRef<str>,
+    #[expect(clippy::unused_async, reason = "Stub method")]
+    /// Stub implementation of function when prometheus feature is disabled.
+    pub async fn get_batch_filesystem_data<T: AsRef<str>>(
+        _hostname: T,
     ) -> HashMap<String, FileSystemMetrics> {
         HashMap::new()
     }

@@ -9,20 +9,20 @@ use crate::{config::get_config, v2::node::Node};
 /// Result of checking dmesg for disk-related errors via SSH.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiskCheckResult {
-    /// Count of I/O errors (e.g., "I/O error", "Buffer I/O error")
+    /// Count of I/O errors (e.g., "I/O error", "Buffer I/O error").
     pub io_errors: u32,
-    /// Count of filesystem errors (e.g., "EXT4-fs error", "XFS error")
+    /// Count of filesystem errors (e.g., "EXT4-fs error", "XFS error").
     pub filesystem_errors: u32,
-    /// Count of block device errors (e.g., "blk_update_request")
+    /// Count of block device errors (e.g., "`blk_update_request`").
     pub block_errors: u32,
-    /// Sample messages from dmesg (first N relevant lines)
+    /// Sample messages from dmesg (first N relevant lines).
     pub sample_messages: Vec<String>,
 }
 
 /// Outcome of a disk check attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DiskCheckOutcome {
-    /// Check completed successfully
+    /// Check completed successfully.
     Checked(DiskCheckResult),
     /// Check failed (SSH error, command error, etc.)
     Failed { reason: String },
@@ -88,9 +88,9 @@ pub(super) async fn check_disk_health(node: &Arc<Node>, ssh_user: &str) -> DiskC
 }
 
 fn parse_dmesg_output(lines: &[&str]) -> DiskCheckResult {
-    let mut io_errors = 0u32;
-    let mut filesystem_errors = 0u32;
-    let mut block_errors = 0u32;
+    let mut io_errors = 0_u32;
+    let mut filesystem_errors = 0_u32;
+    let mut block_errors = 0_u32;
     let mut sample_messages = Vec::new();
 
     for line in lines {
@@ -111,7 +111,7 @@ fn parse_dmesg_output(lines: &[&str]) -> DiskCheckResult {
         }
 
         if sample_messages.len() < MAX_SAMPLE_MESSAGES {
-            sample_messages.push((*line).to_string());
+            sample_messages.push((*line).to_owned());
         }
     }
 
@@ -159,7 +159,9 @@ mod tests {
 
     #[test]
     fn sample_messages_limited() {
-        let lines: Vec<&str> = (0..20).map(|_| "Buffer I/O error on dev sda1").collect();
+        let lines: Vec<&str> = std::iter::repeat_n(0, 20)
+            .map(|_| "Buffer I/O error on dev sda1")
+            .collect();
         let result = parse_dmesg_output(&lines);
 
         assert_eq!(result.io_errors, 20);

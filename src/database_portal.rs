@@ -24,8 +24,7 @@ pub(crate) async fn nodes() -> Result<Vec<Node>, DbPortalErrors> {
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.elapsed().ok())
-        .map(|e| e.as_secs() < ONE_DAY_IN_SECONDS)
-        .unwrap_or(false);
+        .is_some_and(|e| e.as_secs() < ONE_DAY_IN_SECONDS);
 
     if use_cache && let Ok(json) = std::fs::read_to_string(CACHE_PATH) {
         tracing::info!(source = "file", "reading nodes from cache");

@@ -12,6 +12,7 @@ use super::{
     view::{ClusterView, NodeView, PrimaryView, ReasonView, ReplicaView, ReplicasView, Status},
 };
 
+#[expect(clippy::too_many_lines, reason = "102 is 2 more than 100, it's fine")]
 pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
     match health {
         ClusterHealth::Healthy { failover, cluster } => {
@@ -25,18 +26,18 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
             );
             ClusterView {
                 status: Status::Healthy,
-                name: cluster.name().to_string(),
+                name: cluster.name().to_owned(),
                 primary,
                 replicas,
                 lag_bytes: None,
-                disk: "-".to_string(),
+                disk: "-".to_owned(),
                 reason: ReasonView {
                     short: if *failover {
-                        "Failover".to_string()
+                        "Failover".to_owned()
                     } else {
-                        "-".to_string()
+                        "-".to_owned()
                     },
-                    details_json: "{}".to_string(),
+                    details_json: "{}".to_owned(),
                 },
                 failover: *failover,
             }
@@ -59,12 +60,11 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
             let failover = cluster
                 .cluster
                 .primary()
-                .map(|n| !n.node_name.contains("-db001"))
-                .unwrap_or(false);
+                .is_some_and(|n| !n.node_name.contains("-db001"));
             log_degraded(cluster.name(), &reason_view.short, *lag);
             ClusterView {
                 status: Status::Degraded,
-                name: cluster.name().to_string(),
+                name: cluster.name().to_owned(),
                 primary,
                 replicas,
                 lag_bytes: Some(*lag),
@@ -80,7 +80,7 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
             log_critical(cluster.name(), reason, &reason_view.short);
             ClusterView {
                 status: Status::Critical,
-                name: cluster.name().to_string(),
+                name: cluster.name().to_owned(),
                 primary,
                 replicas,
                 lag_bytes: None,
@@ -102,9 +102,10 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
                 reason = %reason_view.short,
                 "cluster state unknown"
             );
+            #[expect(clippy::cast_possible_truncation, reason = "we have 3 nodes total")]
             ClusterView {
                 status: Status::Unknown,
-                name: cluster.name().to_string(),
+                name: cluster.name().to_owned(),
                 primary: PrimaryView::Dash,
                 replicas: ReplicasView::Unknown {
                     reachable: *reachable_nodes as u32,
@@ -221,7 +222,16 @@ fn build_primary_replicas_for_critical(
             let primary = build_primary_view(cluster, show_tl);
             (primary, ReplicasView::None)
         }
-        _ => {
+        Reason::OneReplicaDown
+        | Reason::HighReplicationLag
+        | Reason::RebuildingReplica
+        | Reason::ChainedReplica { .. }
+        | Reason::NotInQuorum { .. }
+        | Reason::ArchiveFailure { .. }
+        | Reason::NoNodesReachable
+        | Reason::UnexpectedTopology
+        | Reason::DiskIoErrors { .. }
+        | Reason::FilesystemErrors { .. } => {
             let show_tl = timelines_differ(&cluster.cluster.nodes);
             let primary = build_primary_view(cluster, show_tl);
             let replicas = build_replicas_view(
@@ -326,7 +336,16 @@ fn log_critical(cluster: &str, reason: &Reason, reason_str: &str) {
                 "no primary found in cluster"
             );
         }
-        _ => {
+        Reason::OneReplicaDown
+        | Reason::HighReplicationLag
+        | Reason::RebuildingReplica
+        | Reason::ChainedReplica { .. }
+        | Reason::NotInQuorum { .. }
+        | Reason::ArchiveFailure { .. }
+        | Reason::NoNodesReachable
+        | Reason::UnexpectedTopology
+        | Reason::DiskIoErrors { .. }
+        | Reason::FilesystemErrors { .. } => {
             tracing::error!(
                 cluster = %cluster,
                 reason = %reason_str,
@@ -342,7 +361,9 @@ fn timelines_differ(nodes: &[AnalyzedNode]) -> bool {
         let tl = match &node.role {
             crate::v2::scan::Role::Primary { health } => Some(health.timeline_id),
             crate::v2::scan::Role::Replica { health } => Some(health.timeline_id),
-            _ => None,
+            crate::v2::scan::Role::Unknown
+            | crate::v2::scan::Role::UnknownPrimary
+            | crate::v2::scan::Role::UnknownReplica => None,
         };
         if let Some(tl) = tl {
             match seen {
@@ -368,7 +389,10 @@ fn find_replica_timeline(app_name: &str, nodes: &[AnalyzedNode]) -> Option<i32> 
         })
         .and_then(|n| match &n.role {
             crate::v2::scan::Role::Replica { health } => Some(health.timeline_id),
-            _ => None,
+            crate::v2::scan::Role::Unknown
+            | crate::v2::scan::Role::UnknownPrimary
+            | crate::v2::scan::Role::UnknownReplica
+            | crate::v2::scan::Role::Primary { .. } => None,
         })
 }
 
@@ -379,21 +403,23 @@ fn find_node_timeline(node_name: &str, nodes: &[AnalyzedNode]) -> Option<i32> {
         .and_then(|n| match &n.role {
             crate::v2::scan::Role::Primary { health } => Some(health.timeline_id),
             crate::v2::scan::Role::Replica { health } => Some(health.timeline_id),
-            _ => None,
+            crate::v2::scan::Role::Unknown
+            | crate::v2::scan::Role::UnknownPrimary
+            | crate::v2::scan::Role::UnknownReplica => None,
         })
 }
 
 fn extract_db_number(node_name: &str) -> String {
     // Node naming: env-pg-appXXX-dbYYY.zone.example.com
     let Some(db_part) = node_name.split('-').find(|p| p.starts_with("db")) else {
-        return node_name.to_string();
+        return node_name.to_owned();
     };
 
     let mut parts = db_part.splitn(3, '.');
     match (parts.next(), parts.next()) {
         (Some(db_num), Some(zone)) => format!("{}@{}", db_num, zone),
-        (Some(db_num), None) => db_num.to_string(),
-        _ => node_name.to_string(),
+        (Some(db_num), None) => db_num.to_owned(),
+        _ => node_name.to_owned(),
     }
 }
 
@@ -402,15 +428,15 @@ fn normalize_application_name(app_name: &str) -> String {
     if let Some(db_part) = app_name.split('_').next_back()
         && db_part.starts_with("db")
     {
-        return db_part.to_string();
+        return db_part.to_owned();
     }
-    app_name.to_string()
+    app_name.to_owned()
 }
 
 fn extract_disk_info(cluster: &AnalyzedCluster) -> String {
-    let mut total_io = 0u32;
-    let mut total_fs = 0u32;
-    let mut total_block = 0u32;
+    let mut total_io = 0_u32;
+    let mut total_fs = 0_u32;
+    let mut total_block = 0_u32;
     let mut checked = 0;
     let mut failed = 0;
 
@@ -430,7 +456,7 @@ fn extract_disk_info(cluster: &AnalyzedCluster) -> String {
     }
 
     if checked == 0 && failed == 0 {
-        return "-".to_string();
+        return "-".to_owned();
     }
 
     let total_errors = total_io + total_fs + total_block;
@@ -440,7 +466,7 @@ fn extract_disk_info(cluster: &AnalyzedCluster) -> String {
     }
 
     if total_errors == 0 {
-        return "ok".to_string();
+        return "ok".to_owned();
     }
 
     let mut parts = Vec::new();
@@ -459,9 +485,9 @@ fn extract_disk_info(cluster: &AnalyzedCluster) -> String {
 
 fn format_reason(reason: &Reason) -> (String, String) {
     match reason {
-        Reason::OneReplicaDown => ("OneReplicaDown".to_string(), "{}".to_string()),
-        Reason::HighReplicationLag => ("HighReplicationLag".to_string(), "{}".to_string()),
-        Reason::RebuildingReplica => ("RebuildingReplica".to_string(), "{}".to_string()),
+        Reason::OneReplicaDown => ("OneReplicaDown".to_owned(), "{}".to_owned()),
+        Reason::HighReplicationLag => ("HighReplicationLag".to_owned(), "{}".to_owned()),
+        Reason::RebuildingReplica => ("RebuildingReplica".to_owned(), "{}".to_owned()),
         Reason::ChainedReplica {
             chained_replica,
             upstream_replica,
@@ -483,14 +509,14 @@ fn format_reason(reason: &Reason) -> (String, String) {
             let details = serde_json::json!({ "replicas": replicas }).to_string();
             (short, details)
         }
-        Reason::NoPrimary => ("NoPrimary".to_string(), "{}".to_string()),
+        Reason::NoPrimary => ("NoPrimary".to_owned(), "{}".to_owned()),
         Reason::SplitBrain(info) => {
             let resolution_str = match &info.resolution {
                 SplitBrainResolution::HigherTimeline {
                     true_primary_timeline,
                     stale_timeline,
                 } => format!("timeline {} > {}", true_primary_timeline, stale_timeline),
-                SplitBrainResolution::ReplicaFollowing { .. } => "replica evidence".to_string(),
+                SplitBrainResolution::ReplicaFollowing { .. } => "replica evidence".to_owned(),
                 SplitBrainResolution::Both {
                     true_primary_timeline,
                     stale_timeline,
@@ -507,7 +533,7 @@ fn format_reason(reason: &Reason) -> (String, String) {
                     "replica overrides timeline ({} < {})",
                     true_primary_timeline, stale_timeline
                 ),
-                SplitBrainResolution::Indeterminate => "indeterminate".to_string(),
+                SplitBrainResolution::Indeterminate => "indeterminate".to_owned(),
             };
             let short = format!("SplitBrain: {}", resolution_str);
             let details = serde_json::json!({
@@ -518,8 +544,8 @@ fn format_reason(reason: &Reason) -> (String, String) {
             .to_string();
             (short, details)
         }
-        Reason::WritesBlocked => ("WritesBlocked".to_string(), "{}".to_string()),
-        Reason::WritesUnprotected => ("WritesUnprotected".to_string(), "{}".to_string()),
+        Reason::WritesBlocked => ("WritesBlocked".to_owned(), "{}".to_owned()),
+        Reason::WritesUnprotected => ("WritesUnprotected".to_owned(), "{}".to_owned()),
         Reason::ArchiveFailure {
             failed_count,
             last_failed_wal,
@@ -532,8 +558,8 @@ fn format_reason(reason: &Reason) -> (String, String) {
             .to_string();
             (short, details)
         }
-        Reason::NoNodesReachable => ("NoNodesReachable".to_string(), "{}".to_string()),
-        Reason::UnexpectedTopology => ("UnexpectedTopology".to_string(), "{}".to_string()),
+        Reason::NoNodesReachable => ("NoNodesReachable".to_owned(), "{}".to_owned()),
+        Reason::UnexpectedTopology => ("UnexpectedTopology".to_owned(), "{}".to_owned()),
         Reason::DiskIoErrors {
             node,
             io_errors,
@@ -545,7 +571,7 @@ fn format_reason(reason: &Reason) -> (String, String) {
                 io_errors,
                 block_errors
             );
-            (short, "{}".to_string())
+            (short, "{}".to_owned())
         }
         Reason::FilesystemErrors { node, count } => {
             let short = format!(
@@ -553,7 +579,7 @@ fn format_reason(reason: &Reason) -> (String, String) {
                 extract_db_number(node),
                 count
             );
-            (short, "{}".to_string())
+            (short, "{}".to_owned())
         }
     }
 }
@@ -585,14 +611,13 @@ fn compute_backup_lag_display(
     let progress_from_prometheus = conns
         .iter()
         .filter_map(|c| {
-            c.client_addr
-                .as_ref()
-                .and_then(|addr| backup_progress.get(addr))
+            let addr = c.client_addr.as_ref()?;
+            backup_progress.get(addr)
         })
         .max();
 
     if let Some(&progress_pct_100) = progress_from_prometheus {
-        let pct = progress_pct_100 as f64 / 100.0;
+        let pct = f64::from(progress_pct_100) / 100.0;
         return Some(format!(" ~{:.1}%", pct));
     }
 

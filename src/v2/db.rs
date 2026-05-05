@@ -5,10 +5,9 @@ use postgres_native_tls::MakeTlsConnector;
 use tokio_postgres::{Client, Config, Connection, Socket, config::SslMode};
 use tracing::instrument;
 
-use crate::{CONFIG, config::DbScanConfig, v2::node::Node};
-pub use db_error::DbError;
+use crate::{CONFIG, config::DbScanConfig, v2::db::db_error::DbError, v2::node::Node};
 
-mod db_error;
+pub mod db_error;
 
 static CONNECTOR: OnceLock<MakeTlsConnector> = OnceLock::new();
 type PgConnection = Connection<Socket, postgres_native_tls::TlsStream<Socket>>;

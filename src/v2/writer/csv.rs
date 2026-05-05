@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufWriter, Write},
+    io::{BufWriter, Write as _},
     path::Path,
 };
 
@@ -27,7 +27,7 @@ impl CsvWriter {
         let writer = Self::open(path);
         Self {
             writer,
-            path: path.to_string(),
+            path: path.to_owned(),
         }
     }
 
@@ -90,15 +90,15 @@ mod tests {
     fn test_csv_strips_sigils_from_primary_and_replicas() {
         let view = ClusterView {
             status: Status::Healthy,
-            name: "test-cluster".to_string(),
+            name: "test-cluster".to_owned(),
             primary: PrimaryView::Single(NodeView {
-                display: "db002".to_string(),
+                display: "db002".to_owned(),
                 timeline: Some(7),
             }),
             replicas: super::super::view::ReplicasView::List(vec![
                 super::super::view::ReplicaView {
                     node: NodeView {
-                        display: "db003".to_string(),
+                        display: "db003".to_owned(),
                         timeline: Some(7),
                     },
                     conn_count: 1,
@@ -106,10 +106,10 @@ mod tests {
                 },
             ]),
             lag_bytes: None,
-            disk: "-".to_string(),
+            disk: "-".to_owned(),
             reason: ReasonView {
-                short: "-".to_string(),
-                details_json: "{}".to_string(),
+                short: "-".to_owned(),
+                details_json: "{}".to_owned(),
             },
             failover: false,
         };
@@ -130,11 +130,11 @@ mod tests {
         let replicas_terminal = view.replicas_content(RenderMode::WithSigils);
 
         assert_eq!(
-            primary_terminal, "db002⁷",
+            primary_terminal, "db002\u{2077}",
             "terminal primary must include timeline sigil"
         );
         assert_eq!(
-            replicas_terminal, "db003⁷",
+            replicas_terminal, "db003\u{2077}",
             "terminal replicas must include timeline sigil"
         );
     }

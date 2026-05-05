@@ -9,7 +9,7 @@ use crate::{
     config::get_config,
     pipeline::PipelineContext,
     v2::{
-        db::{self, DbError},
+        db::{self, db_error::DbError},
         node::Node,
         scan::{disk_check::DiskCheckOutcome, health_check_primary::PrimaryHealthCheckResult},
     },
@@ -28,7 +28,7 @@ pub async fn scan_nodes(
     let mut handles = Vec::new();
     while let Some(node) = rx.recv().await {
         let tx = tx.clone();
-        handles.push(tokio::spawn(async move { scan(node, tx).await }))
+        handles.push(tokio::spawn(async move { scan(node, tx).await }));
     }
     futures::future::join_all(handles).await;
 }
@@ -41,7 +41,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
 
     // Start disk check in parallel if enabled — runs concurrently with PG health check
     let mut disk_check_handle = if config.check_disks && config.ssh_user.is_some() {
-        let n = node.clone();
+        let n = Arc::clone(&node);
         let user = config.ssh_user.clone().unwrap();
         Some(tokio::spawn(async move {
             disk_check::check_disk_health(&n, &user).await
@@ -93,7 +93,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
         // If we get here, all retries failed
         let e = last_error.unwrap();
         let disk_check = collect_disk_check(disk_check_handle.take()).await;
-        match tx.send(AnalyzedNode {
+        if let Ok(()) = tx.send(AnalyzedNode {
             id: node.id,
             cluster_id: node.cluster_id,
             node_name: node.node_name.clone(),
@@ -103,16 +103,15 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
             errors: vec![e],
             disk_check,
         }) {
-            Ok(_) => {
-                tracing::trace!(node_name = %node.node_name, "sent analyzed node after connection failure")
-            }
-            Err(_) => tracing::error!(node_name = %node.node_name, "failed to send analyzed node"),
+            tracing::trace!(node_name = %node.node_name, "sent analyzed node after connection failure");
+        } else {
+            tracing::error!(node_name = %node.node_name, "failed to send analyzed node");
         }
         return;
     };
 
     let conn_tx = tx.clone();
-    let conn_node = node.clone();
+    let conn_node = Arc::clone(&node);
     tokio::spawn(async move {
         if let Err(e) = conn.await {
             tracing::error!(node_name = %conn_node.node_name, error = %e, "postgres connection closed with error");
@@ -126,11 +125,11 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                 errors: vec![e.into()],
                 disk_check: None,
             }) {
-                Ok(_) => {
-                    tracing::trace!(node_name = %conn_node.node_name, "sent analyzed node after connection error")
+                Ok(()) => {
+                    tracing::trace!(node_name = %conn_node.node_name, "sent analyzed node after connection error");
                 }
                 Err(e) => {
-                    tracing::error!(node_name = %conn_node.node_name, error = %e, "failed to send analyzed node")
+                    tracing::error!(node_name = %conn_node.node_name, error = %e, "failed to send analyzed node");
                 }
             }
         }
@@ -139,7 +138,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
     let primary = match is_primary(&client).await {
         Ok(r) => r,
         Err(e) => {
-            let node_r = node.clone();
+            let node_r = Arc::clone(&node);
             let disk_check = collect_disk_check(disk_check_handle.take()).await;
             return match tx.send(AnalyzedNode {
                 id: node.id,
@@ -151,11 +150,11 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                 errors: vec![e],
                 disk_check,
             }) {
-                Ok(_) => {
-                    tracing::trace!(node_name = %node_r.node_name, "sent node with unknown role")
+                Ok(()) => {
+                    tracing::trace!(node_name = %node_r.node_name, "sent node with unknown role");
                 }
                 Err(e) => {
-                    tracing::error!(node_name = %node_r.node_name, error = %e, "failed to send node with unknown role")
+                    tracing::error!(node_name = %node_r.node_name, error = %e, "failed to send node with unknown role");
                 }
             };
         }
@@ -218,7 +217,7 @@ pub struct AnalyzedNode {
     pub ip_address: Ipv4Addr,
     pub role: Role,
     pub errors: Vec<DbError>,
-    /// Disk health check result (populated for all nodes when --check-disks is set)
+    /// Disk health check result (populated for all nodes when --check-disks is set).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_check: Option<DiskCheckOutcome>,
 }
@@ -293,15 +292,15 @@ use crate::v2::scan::health_check_replica::ReplicaHealthCheckResult;
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Unknown,
-    /// If the primary health check fails
+    /// If the primary health check fails.
     UnknownPrimary,
-    /// If the replica health check fails
+    /// If the replica health check fails.
     UnknownReplica,
-    /// Primary node
+    /// Primary node.
     Primary {
         health: Box<PrimaryHealthCheckResult>,
     },
-    /// Replica node
+    /// Replica node.
     Replica {
         health: Box<ReplicaHealthCheckResult>,
     },
@@ -320,7 +319,9 @@ impl Role {
     pub fn as_primary(&self) -> Option<&PrimaryHealthCheckResult> {
         match self {
             Role::Primary { health } => Some(health),
-            _ => None,
+            Role::Unknown | Role::UnknownPrimary | Role::UnknownReplica | Role::Replica { .. } => {
+                None
+            }
         }
     }
 }

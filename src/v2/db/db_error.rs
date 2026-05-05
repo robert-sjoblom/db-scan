@@ -43,12 +43,12 @@ impl From<serde_json::Error> for DbError {
 impl Eq for DbError {}
 impl PartialEq for DbError {
     fn eq(&self, other: &Self) -> bool {
-        use DbError::*;
+        use DbError::{Io, Postgres, SerdeJson, TlsConnector};
         match (self, other) {
-            (TlsConnector(a), TlsConnector(b)) => a == b,
-            (Postgres(a), Postgres(b)) => a == b,
-            (Io(a), Io(b)) => a == b,
-            (SerdeJson(a), SerdeJson(b)) => a == b,
+            (TlsConnector(a), TlsConnector(b))
+            | (Postgres(a), Postgres(b))
+            | (Io(a), Io(b))
+            | (SerdeJson(a), SerdeJson(b)) => a == b,
             _ => false,
         }
     }
