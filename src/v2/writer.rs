@@ -1,11 +1,8 @@
 mod build;
 mod csv;
 mod terminal;
-mod units;
+pub mod units;
 mod view;
-
-#[cfg(test)]
-pub use units::parse_lag_to_bytes;
 
 use std::{collections::HashSet, sync::Arc};
 
@@ -13,16 +10,16 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::{pipeline::PipelineContext, v2::analyze::ClusterHealth};
 
-/// Output options for the writer
+/// Output options for the writer.
 #[derive(Debug, Default)]
 pub struct WriterOptions {
-    /// Show healthy clusters (default: false)
+    /// Show healthy clusters (default: false).
     pub show_healthy: bool,
-    /// Show healthy clusters that have experienced failover (default: false)
+    /// Show healthy clusters that have experienced failover (default: false).
     pub show_failover: bool,
-    /// Path to write CSV output (optional)
+    /// Path to write CSV output (optional).
     pub csv_path: Option<String>,
-    /// Disable colors in terminal output
+    /// Disable colors in terminal output.
     pub no_color: bool,
 }
 
@@ -35,7 +32,7 @@ pub struct ScanResult {
     pub clusters_to_rescan: HashSet<String>,
 }
 
-/// Collects ClusterHealth results, streams to CSV, returns scan result.
+/// Collects `ClusterHealth` results, streams to CSV, returns scan result.
 pub async fn write_results(
     ctx: Arc<PipelineContext>,
     mut analyze_rx: UnboundedReceiver<ClusterHealth>,
@@ -71,7 +68,7 @@ fn cluster_to_rescan(health: &ClusterHealth) -> Option<String> {
         ClusterHealth::Healthy { .. } => None,
         ClusterHealth::Degraded { cluster, .. }
         | ClusterHealth::Critical { cluster, .. }
-        | ClusterHealth::Unknown { cluster, .. } => Some(cluster.name().to_string()),
+        | ClusterHealth::Unknown { cluster, .. } => Some(cluster.name().to_owned()),
     }
 }
 
@@ -80,7 +77,9 @@ fn should_display(health: &ClusterHealth, options: &WriterOptions) -> bool {
         ClusterHealth::Healthy { failover, .. } => {
             options.show_healthy || (*failover && options.show_failover)
         }
-        _ => true,
+        ClusterHealth::Degraded { .. }
+        | ClusterHealth::Critical { .. }
+        | ClusterHealth::Unknown { .. } => true,
     }
 }
 
@@ -93,28 +92,28 @@ mod tests {
 
     #[test]
     fn test_to_superscript() {
-        assert_eq!(to_superscript(0), "⁰");
-        assert_eq!(to_superscript(7), "⁷");
-        assert_eq!(to_superscript(10), "¹⁰");
-        assert_eq!(to_superscript(19), "¹⁹");
+        assert_eq!(to_superscript(0), "\u{2070}");
+        assert_eq!(to_superscript(7), "\u{2077}");
+        assert_eq!(to_superscript(10), "\u{b9}\u{2070}");
+        assert_eq!(to_superscript(19), "\u{b9}\u{2079}");
     }
 
     #[test]
     fn test_format_node_sigils() {
         let n = NodeView {
-            display: "db002@sto1".to_string(),
+            display: "db002@sto1".to_owned(),
             timeline: Some(7),
         };
-        assert_eq!(n.render(RenderMode::WithSigils), "db002@sto1⁷");
+        assert_eq!(n.render(RenderMode::WithSigils), "db002@sto1\u{2077}");
 
         let n = NodeView {
-            display: "db002".to_string(),
+            display: "db002".to_owned(),
             timeline: Some(10),
         };
-        assert_eq!(n.render(RenderMode::WithSigils), "db002¹⁰");
+        assert_eq!(n.render(RenderMode::WithSigils), "db002\u{b9}\u{2070}");
 
         let n = NodeView {
-            display: "db002".to_string(),
+            display: "db002".to_owned(),
             timeline: None,
         };
         assert_eq!(n.render(RenderMode::WithSigils), "db002");
@@ -123,31 +122,31 @@ mod tests {
     #[test]
     fn test_display_width_with_sigils() {
         let n = NodeView {
-            display: "db002".to_string(),
+            display: "db002".to_owned(),
             timeline: Some(7),
         };
         let s = n.render(RenderMode::WithSigils);
         assert_eq!(s.len(), 8); // byte count
         assert_eq!(display_width(&s), 6); // column count
         assert_eq!(display_width("db002"), 5);
-        assert_eq!(display_width("db002⁷*"), 7); // hypothetical, if * were added
+        assert_eq!(display_width("db002\u{2077}*"), 7); // hypothetical, if * were added
     }
 
     #[test]
     fn test_output_row_ordering() {
         let make = |status: Status, name: &str| ClusterView {
             status,
-            name: name.to_string(),
+            name: name.to_owned(),
             primary: PrimaryView::Single(NodeView {
-                display: "db001".to_string(),
+                display: "db001".to_owned(),
                 timeline: None,
             }),
             replicas: ReplicasView::None,
             lag_bytes: None,
-            disk: "-".to_string(),
+            disk: "-".to_owned(),
             reason: ReasonView {
-                short: "-".to_string(),
-                details_json: "{}".to_string(),
+                short: "-".to_owned(),
+                details_json: "{}".to_owned(),
             },
             failover: false,
         };

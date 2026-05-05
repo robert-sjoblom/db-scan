@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     time::{Duration, Instant},
 };
 
@@ -58,7 +59,7 @@ pub async fn reporter(mut rx: UnboundedReceiver<Event>) -> Option<String> {
                 if let Some(timing) = timings.get_mut(&t) {
                     timing.stop = Some(Instant::now());
                 } else {
-                    tracing::warn!(timing = ?t, "received end event for unknown timing")
+                    tracing::warn!(timing = ?t, "received end event for unknown timing");
                 }
             }
             Event::Complete => break,
@@ -67,9 +68,10 @@ pub async fn reporter(mut rx: UnboundedReceiver<Event>) -> Option<String> {
 
     let durations: HashMap<Stage, Duration> = timings
         .into_iter()
-        .filter_map(|(k, v)| match v.stop {
-            Some(stop) => Some((k, stop.duration_since(v.start))),
-            None => {
+        .filter_map(|(k, v)| {
+            if let Some(stop) = v.stop {
+                Some((k, stop.duration_since(v.start)))
+            } else {
                 tracing::warn!(timing = ?k, "incomplete timing: received start without end");
                 None
             }
@@ -104,12 +106,12 @@ fn format_timings(durations: &HashMap<Stage, Duration>) -> Option<String> {
     for (timing, duration) in sorted {
         let label = format!("{timing}");
         let formatted_duration = format_duration(duration);
-        output.push_str(&format!("{:<14} {}\n", label, formatted_duration));
+        let _ = writeln!(output, "{:<14} {}", label, formatted_duration);
         total += *duration;
     }
 
-    output.push_str("────────────────────────\n");
-    output.push_str(&format!("{:<14} {}\n", "Total", format_duration(&total)));
+    output.push_str("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    let _ = writeln!(output, "{:<14} {}", "Total", format_duration(&total));
 
     Some(output)
 }
@@ -134,7 +136,7 @@ mod tests {
     #[test]
     fn format_duration_minutes() {
         assert_eq!(format_duration(&Duration::from_secs(90)), "  1.5 m");
-        assert_eq!(format_duration(&Duration::from_secs(300)), "  5.0 m");
+        assert_eq!(format_duration(&Duration::from_mins(5)), "  5.0 m");
     }
 
     #[test]
@@ -149,7 +151,7 @@ mod tests {
             output,
             "Prometheus       123 ms\n\
              Scan               5 ms\n\
-             ────────────────────────\n\
+             \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\
              Total            128 ms\n"
         );
     }

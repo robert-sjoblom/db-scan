@@ -8,7 +8,7 @@ use crate::{
     v2::scan::{AnalyzedNode, health_check_primary::ReplicationConnection},
 };
 
-/// Listens for incoming Nodes, groups them by cluster_id, and sends complete Clusters
+/// Listens for incoming Nodes, groups them by `cluster_id`, and sends complete Clusters
 /// to the provided cluster channel. A Cluster is considered complete when it has 3 Nodes.
 ///
 /// If the channel closes, the function will exit gracefully after logging any incomplete clusters.
@@ -47,10 +47,10 @@ pub async fn cluster_builder(
         }
     }
 
-    if !nodes.is_empty() {
-        tracing::warn!(incomplete_clusters = nodes.len(), clusters = ?nodes, "node channel closed with incomplete clusters");
-    } else {
+    if nodes.is_empty() {
         tracing::info!("node channel closed, all clusters processed");
+    } else {
+        tracing::warn!(incomplete_clusters = nodes.len(), clusters = ?nodes, "node channel closed with incomplete clusters");
     }
 }
 
@@ -64,17 +64,17 @@ pub struct Cluster {
 }
 
 impl Cluster {
-    /// Returns an iterator over all primary nodes in the cluster
+    /// Returns an iterator over all primary nodes in the cluster.
     pub fn primaries(&self) -> impl Iterator<Item = &AnalyzedNode> {
         self.nodes.iter().filter(|n| n.role.is_primary())
     }
 
-    /// Returns an iterator over all replica nodes in the cluster
+    /// Returns an iterator over all replica nodes in the cluster.
     pub fn replicas(&self) -> impl Iterator<Item = &AnalyzedNode> {
         self.nodes.iter().filter(|n| n.role.is_replica())
     }
 
-    /// Returns the primary node if exactly one exists
+    /// Returns the primary node if exactly one exists.
     pub fn primary(&self) -> Option<&AnalyzedNode> {
         let primaries: Vec<_> = self.primaries().collect();
         if primaries.len() == 1 {
@@ -87,16 +87,17 @@ impl Cluster {
             None
         }
     }
-}
 
-impl Cluster {
-    /// Returns replication connections from the primary (if there's only one primary)
+    /// Returns replication connections from the primary (if there's only one primary).
     pub fn primary_replication_info(&self) -> Option<&Vec<ReplicationConnection>> {
         use super::scan::Role;
 
-        self.primary().and_then(|p| match &p.role {
+        let p = self.primary()?;
+        match &p.role {
             Role::Primary { health } => Some(&health.replication),
-            _ => None,
-        })
+            Role::Unknown | Role::UnknownPrimary | Role::UnknownReplica | Role::Replica { .. } => {
+                None
+            }
+        }
     }
 }

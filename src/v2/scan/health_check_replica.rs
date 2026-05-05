@@ -7,7 +7,7 @@ use tokio_postgres::Client;
 use tracing::instrument;
 
 use crate::v2::{
-    db::DbError,
+    db::db_error::DbError,
     node::Node,
     scan::{AnalyzedNode, Role},
 };
@@ -101,7 +101,7 @@ static HEALTH_CHECK_REPLICA_QUERY: &str = "SELECT jsonb_build_object(
     )
 )::text;";
 
-#[instrument(skip(client, tx), level = "debug", fields(node_name = %node.node_name, node_id = node.id))]
+#[instrument(skip(client, tx), level = "debug", fields(node_name = %node.name, node_id = node.id))]
 pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<AnalyzedNode>) {
     tracing::info!("starting replica health check");
 
@@ -119,7 +119,7 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
             AnalyzedNode {
                 id: node.id,
                 cluster_id: node.cluster_id,
-                node_name: node.node_name.clone(),
+                node_name: node.name.clone(),
                 pg_version: node.pg_version.clone(),
                 ip_address: node.ip_address,
                 role: Role::Replica {
@@ -135,7 +135,7 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
             AnalyzedNode {
                 id: node.id,
                 cluster_id: node.cluster_id,
-                node_name: node.node_name.clone(),
+                node_name: node.name.clone(),
                 pg_version: node.pg_version.clone(),
                 ip_address: node.ip_address,
                 role: Role::UnknownReplica,
@@ -148,11 +148,11 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
     tracing::trace!(result = ?analyzed, "Replica health check raw result");
 
     match tx.send(analyzed) {
-        Ok(_) => tracing::trace!(node_name = %node.node_name, "health checked replica node"),
+        Ok(()) => tracing::trace!(node_name = %node.name, "health checked replica node"),
         Err(e) => {
-            tracing::error!(node_name = %node.node_name, error = %e, "failed to send health checked replica node")
+            tracing::error!(node_name = %node.name, error = %e, "failed to send health checked replica node");
         }
-    };
+    }
 }
 
 #[instrument(skip(client), level = "trace")]

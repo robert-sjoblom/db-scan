@@ -7,7 +7,7 @@ use tokio_postgres::Client;
 use tracing::instrument;
 
 use crate::v2::{
-    db::DbError,
+    db::db_error::DbError,
     node::Node,
     scan::{AnalyzedNode, Role},
 };
@@ -16,13 +16,13 @@ use crate::v2::{
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PgSyncSettings {
-    /// Replica is part of the synchronous quorum
+    /// Replica is part of the synchronous quorum.
     Quorum,
-    /// Replica is the single designated synchronous standby
+    /// Replica is the single designated synchronous standby.
     Sync,
-    /// Replica would become sync/quorum if a higher-priority one drops
+    /// Replica would become sync/quorum if a higher-priority one drops.
     Potential,
-    /// Replica is asynchronous - primary does not wait for it before acking writes
+    /// Replica is asynchronous - primary does not wait for it before acking writes.
     Async,
 }
 
@@ -88,7 +88,7 @@ pub struct ReplicationConnection {
     pub backend_start: DateTime<Utc>,
     pub backend_xmin: Option<String>,
     pub state: String,
-    /// LSN fields can be null for connections in "backup" state (e.g., pg_basebackup)
+    /// LSN fields can be null for connections in "backup" state (e.g., `pg_basebackup`).
     pub sent_lsn: Option<String>,
     pub write_lsn: Option<String>,
     pub flush_lsn: Option<String>,
@@ -173,7 +173,7 @@ static HEALTH_CHECK_PRIMARY_QUERY: &str = "SELECT jsonb_build_object(
     )
 )::text;";
 
-#[instrument(skip(client, tx), level = "debug", fields(node_name = %node.node_name))]
+#[instrument(skip(client, tx), level = "debug", fields(node_name = %node.name))]
 pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<AnalyzedNode>) {
     tracing::info!("starting primary health check");
 
@@ -190,7 +190,7 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
             AnalyzedNode {
                 id: node.id,
                 cluster_id: node.cluster_id,
-                node_name: node.node_name.clone(),
+                node_name: node.name.clone(),
                 pg_version: node.pg_version.clone(),
                 ip_address: node.ip_address,
                 role: Role::Primary {
@@ -206,7 +206,7 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
             AnalyzedNode {
                 id: node.id,
                 cluster_id: node.cluster_id,
-                node_name: node.node_name.clone(),
+                node_name: node.name.clone(),
                 pg_version: node.pg_version.clone(),
                 ip_address: node.ip_address,
                 role: Role::UnknownPrimary,
@@ -219,11 +219,11 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
     tracing::trace!(result = ?analyzed, "Primary health check raw result");
 
     match tx.send(analyzed) {
-        Ok(_) => tracing::trace!(node_name = %node.node_name, "health checked primary node"),
+        Ok(()) => tracing::trace!(node_name = %node.name, "health checked primary node"),
         Err(e) => {
-            tracing::error!(node_name = %node.node_name, error = %e, "failed to send health checked primary node")
+            tracing::error!(node_name = %node.name, error = %e, "failed to send health checked primary node");
         }
-    };
+    }
 }
 
 #[instrument(skip(client), level = "trace")]
@@ -257,7 +257,7 @@ mod tests {
         // pg_basebackup connections have null LSN fields - verify our schema handles this
         let json = serde_json::json!({
             "pid": 123,
-            "usesysid": 16387,
+            "usesysid": 0x4003,
             "usename": "replicator",
             "application_name": "pg_basebackup",
             "client_addr": "10.0.0.1",

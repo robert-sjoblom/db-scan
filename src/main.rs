@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::Parser;
+use clap::Parser as _;
 use error_stack::Report;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::instrument;
@@ -68,7 +68,7 @@ async fn run_single_scan(writer_options: Arc<WriterOptions>) {
 
     let result = run_scan(&timings_tx, batch_data, writer_options, None).await;
 
-    timings_tx.send(Event::Complete).ok();
+    let _ = timings_tx.send(Event::Complete);
     drop(timings_tx);
 
     let elapsed = now.elapsed();
@@ -103,7 +103,7 @@ async fn run_watch_mode(writer_options: Arc<WriterOptions>, interval: Duration) 
         let result = run_scan(
             &timings_tx,
             batch_data,
-            writer_options.clone(),
+            Arc::clone(&writer_options),
             cluster_filter.as_ref(),
         )
         .await;
@@ -141,7 +141,7 @@ async fn run_watch_mode(writer_options: Arc<WriterOptions>, interval: Duration) 
                 print!("{}", last_output);
                 break;
             }
-            _ = tokio::time::sleep(interval) => {}
+            () = tokio::time::sleep(interval) => {}
         }
     }
 }
@@ -161,14 +161,16 @@ async fn run_scan(
         .source(Stage::DatabasePortal, move |ctx, tx| {
             filter_nodes(ctx, tx, filter)
         })
-        .stage(Stage::Scan, |ctx, rx, tx| scan_nodes(ctx.clone(), rx, tx))
+        .stage(Stage::Scan, |ctx, rx, tx| {
+            scan_nodes(Arc::clone(&ctx), rx, tx)
+        })
         .stage(Stage::Clustering, |ctx, rx, tx| {
-            cluster_builder(ctx.clone(), rx, tx)
+            cluster_builder(Arc::clone(&ctx), rx, tx)
         })
         .stage(Stage::Analyze, |ctx, rx, tx| {
-            analyze_clusters(ctx.clone(), rx, tx)
+            analyze_clusters(Arc::clone(&ctx), rx, tx)
         })
-        .sink(Stage::Write, |ctx, rx| write_results(ctx.clone(), rx))
+        .sink(Stage::Write, |ctx, rx| write_results(Arc::clone(&ctx), rx))
         .run()
         .await
 }
@@ -177,7 +179,7 @@ async fn run_scan(
 async fn batch_filesystem_data(
     timings_tx: UnboundedSender<Event>,
 ) -> HashMap<String, FileSystemMetrics> {
-    timings_tx.send(Event::Start(Stage::Prometheus)).ok();
+    let _ = timings_tx.send(Event::Start(Stage::Prometheus));
 
     let data = prometheus::client::get_batch_filesystem_data(get_config().cluster_pattern()).await;
 
@@ -189,7 +191,7 @@ async fn batch_filesystem_data(
             "fetched prometheus filesystem metrics"
         );
     }
-    timings_tx.send(Event::End(Stage::Prometheus)).ok();
+    let _ = timings_tx.send(Event::End(Stage::Prometheus));
     data
 }
 
@@ -202,7 +204,7 @@ async fn filter_nodes(
         Ok(nodes) => nodes,
         Err(e) => {
             tracing::error!(error = %e, "failed to fetch nodes from database portal");
-            ctx.timings_tx.send(Event::End(Stage::DatabasePortal)).ok();
+            let _ = ctx.timings_tx.send(Event::End(Stage::DatabasePortal));
             return;
         }
     };
@@ -240,10 +242,10 @@ async fn filter_nodes(
         .inspect(|n| {
             tracing::trace!(
                 node_id = n.id,
-                node_name = %n.node_name,
+                node_name = %n.name,
                 cluster_id = n.cluster_id,
                 "fetched node"
-            )
+            );
         })
     {
         if tx.send(node).is_err() {

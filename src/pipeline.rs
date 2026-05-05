@@ -32,7 +32,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use error_stack::{FutureExt, Report, ResultExt};
+use error_stack::{FutureExt as _, Report, ResultExt as _};
 use futures::future::join_all;
 use tokio::{
     spawn,
@@ -147,12 +147,12 @@ impl<Ctx: Timings> Pipeline<Ctx, Empty> {
     {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let ctx = self.context.clone();
+        let ctx = Arc::clone(&self.context);
         let fut = async move {
-            ctx.timings().send(Event::Start(stage)).ok();
-            let ctx_for_f = ctx.clone();
+            let _ = ctx.timings().send(Event::Start(stage));
+            let ctx_for_f = Arc::clone(&ctx);
             f(ctx_for_f, tx).await;
-            ctx.timings().send(Event::End(stage)).ok();
+            let _ = ctx.timings().send(Event::End(stage));
         };
 
         let mut handles = self.handles;
@@ -180,12 +180,12 @@ impl<Ctx: Timings, In> Pipeline<Ctx, HasSource<In>> {
     {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let ctx = self.context.clone();
+        let ctx = Arc::clone(&self.context);
         let fut = async move {
-            ctx.timings().send(Event::Start(stage)).ok();
-            let ctx_for_f = ctx.clone();
+            let _ = ctx.timings().send(Event::Start(stage));
+            let ctx_for_f = Arc::clone(&ctx);
             f(ctx_for_f, self.state.receiver, tx).await;
-            ctx.timings().send(Event::End(stage)).ok();
+            let _ = ctx.timings().send(Event::End(stage));
         };
 
         let mut handles = self.handles;
@@ -209,12 +209,12 @@ impl<Ctx: Timings, In> Pipeline<Ctx, HasSource<In>> {
         F: FnOnce(Arc<Ctx>, UnboundedReceiver<In>) -> Fut + Send + 'static,
         Fut: Future<Output = R> + Send + 'static,
     {
-        let ctx = self.context.clone();
+        let ctx = Arc::clone(&self.context);
         let fut = async move {
-            ctx.timings().send(Event::Start(stage)).ok();
-            let ctx_for_f = ctx.clone();
+            let _ = ctx.timings().send(Event::Start(stage));
+            let ctx_for_f = Arc::clone(&ctx);
             let result = f(ctx_for_f, self.state.receiver).await;
-            ctx.timings().send(Event::End(stage)).ok();
+            let _ = ctx.timings().send(Event::End(stage));
             result
         };
 
@@ -279,12 +279,12 @@ mod tests {
 
         let result = Pipeline::new(ctx)
             .source(Stage::DatabasePortal, |_ctx, tx| async move {
-                tx.send("hello").ok();
-                tx.send("world").ok();
+                let _ = tx.send("hello");
+                let _ = tx.send("world");
             })
             .stage(Stage::Scan, |_ctx, mut rx, tx| async move {
                 while let Some(s) = rx.recv().await {
-                    tx.send(s.len()).ok();
+                    let _ = tx.send(s.len());
                 }
             })
             .sink(Stage::Analyze, |_ctx, mut rx| async move {

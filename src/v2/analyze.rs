@@ -12,11 +12,11 @@ use crate::{
     },
 };
 
-/// WAL generation rate in bytes per second (approximately 16MB/s under typical load)
+/// WAL generation rate in bytes per second (approximately 16MB/s under typical load).
 const WAL_GENERATION_RATE_BYTES_PER_SEC: u64 = 16_000_000;
-/// Maximum acceptable replication lag in seconds
+/// Maximum acceptable replication lag in seconds.
 const LAG_THRESHOLD_SECONDS: u64 = 5;
-/// Replication lag threshold in bytes
+/// Replication lag threshold in bytes.
 const LAG_THRESHOLD_BYTES: u64 = WAL_GENERATION_RATE_BYTES_PER_SEC * LAG_THRESHOLD_SECONDS;
 
 type Ip = String;
@@ -47,7 +47,7 @@ pub async fn analyze_clusters(
         let analyzed = analyze_with_enrichment(cluster, &ctx.batch_data);
 
         match analyzed_tx.send(analyzed) {
-            Ok(_) => tracing::trace!("sent analyzed cluster"),
+            Ok(()) => tracing::trace!("sent analyzed cluster"),
             Err(e) => tracing::error!(error = %e, "failed to send analyzed cluster"),
         }
     }
@@ -70,7 +70,7 @@ fn analyze_with_enrichment(
     replication_connections = tracing::field::Empty,
     basebackup_count = tracing::field::Empty,
 ))]
-/// Calculate backup progress for any pg_basebackup connections on the primary
+/// Calculate backup progress for any `pg_basebackup` connections on the primary
 fn calculate_backup_progress(
     cluster: &Cluster,
     batch_data: &HashMap<Ip, FileSystemMetrics>,
@@ -354,7 +354,7 @@ fn analyze_full_redundancy(
 
 /// Analyze a cluster with one replica down (1 replica visible).
 ///
-/// Always returns Degraded with OneReplicaDown reason.
+/// Always returns Degraded with `OneReplicaDown` reason.
 fn analyze_one_replica_down(
     cluster: Cluster,
     backup_progress: HashMap<String, u16>,
@@ -372,7 +372,7 @@ fn analyze_one_replica_down(
 
 /// Analyze a cluster with no replicas visible.
 ///
-/// Returns Critical with either WritesUnprotected (sync_commit=off) or WritesBlocked (sync_commit=on).
+/// Returns Critical with either `WritesUnprotected` (`sync_commit=off`) or `WritesBlocked` (`sync_commit=on`).
 fn analyze_no_replicas(
     cluster: Cluster,
     backup_progress: HashMap<String, u16>,
@@ -392,7 +392,7 @@ fn analyze_no_replicas(
     }
 }
 
-/// Check if this node is a failover node (not db001)
+/// Check if this node is a failover node (not db001).
 fn is_failover_node(node_name: &str) -> bool {
     // Node naming convention: env-pg-appXXX-dbYYY.zone.example.com
     // db001 is the original primary, db002/db003 are replicas
@@ -401,7 +401,7 @@ fn is_failover_node(node_name: &str) -> bool {
 }
 
 /// Calculate maximum replication lag from primary health data
-/// Only considers actual replica connections, excludes backup operations (pg_basebackup, etc.)
+/// Only considers actual replica connections, excludes backup operations (`pg_basebackup`, etc.)
 fn calculate_max_lag(primary: &AnalyzedNode) -> u64 {
     if let Role::Primary { health } = &primary.role {
         // Calculate lag from LSN differences (sent_lsn - replay_lsn)
@@ -433,7 +433,7 @@ fn calculate_max_lag(primary: &AnalyzedNode) -> u64 {
     }
 }
 
-/// Check if a replica is actively streaming (has wal_receiver)
+/// Check if a replica is actively streaming (has `wal_receiver`).
 fn is_replica_streaming(node: &AnalyzedNode) -> bool {
     if let Role::Replica { health } = &node.role {
         health.wal_receiver.is_some()
@@ -444,13 +444,13 @@ fn is_replica_streaming(node: &AnalyzedNode) -> bool {
 
 /// Check if writes are unprotected (no synchronous replication).
 /// This is true when:
-/// - synchronous_commit is "off" or "local"
+/// - `synchronous_commit` is "off" or "local"
 ///   Check if archive command has never succeeded since this node became primary.
 ///
-/// Returns Some((failed_count, last_failed_wal)) if:
-/// - archive_mode = "on"
-/// - archived_count = 0 (no successful archives)
-/// - failed_count > 0 (there have been failures)
+/// Returns `Some((failed_count`, `last_failed_wal`)) if:
+/// - `archive_mode` = "on"
+/// - `archived_count` = 0 (no successful archives)
+/// - `failed_count` > 0 (there have been failures)
 ///
 /// TODO: Consider adding Degraded state when `last_failed_time > last_archived_time`
 /// (archive was working but most recent attempt failed). WAL archives at least every 15 min.
@@ -472,22 +472,20 @@ fn check_archive_failure(primary: &AnalyzedNode) -> Option<(i64, Option<String>)
     }
 }
 
-/// - OR synchronous_standby_names is empty (even with remote_apply, writes won't block)
+/// - OR `synchronous_standby_names` is empty (even with `remote_apply`, writes won't block)
 ///
-/// See: https://postgresqlco.nf/doc/en/param/synchronous_commit/
+/// See: <https://postgresqlco.nf/doc/en/param/synchronous_commit>/.
 fn is_sync_commit_off(primary: &AnalyzedNode) -> bool {
     if let Role::Primary { health } = &primary.role {
         let sync_commit_off = health
             .configuration
             .get("synchronous_commit")
-            .map(|v| v == "off" || v == "local")
-            .unwrap_or(false);
+            .is_some_and(|v| v == "off" || v == "local");
 
         let standby_names_empty = health
             .configuration
             .get("synchronous_standby_names")
-            .map(|v| v.is_empty())
-            .unwrap_or(false);
+            .is_some_and(std::string::String::is_empty);
 
         sync_commit_off || standby_names_empty
     } else {
@@ -495,7 +493,7 @@ fn is_sync_commit_off(primary: &AnalyzedNode) -> bool {
     }
 }
 
-/// Returns application_names of replicas whose sync_state is not Quorum.
+/// Returns `application_names` of replicas whose `sync_state` is not Quorum.
 fn find_non_quorum_replicas(primary: &AnalyzedNode) -> Vec<String> {
     let Role::Primary { health } = &primary.role else {
         return Vec::new();
@@ -508,11 +506,11 @@ fn find_non_quorum_replicas(primary: &AnalyzedNode) -> Vec<String> {
         .collect()
 }
 
-/// Information about a chained replica
+/// Information about a chained replica.
 struct ChainedReplicaInfo {
-    /// The replica that is chained
+    /// The replica that is chained.
     chained_replica: String,
-    /// The upstream replica it's replicating from
+    /// The upstream replica it's replicating from.
     upstream_replica: String,
 }
 
@@ -543,7 +541,7 @@ fn detect_chained_replica(
             {
                 return Some(ChainedReplicaInfo {
                     chained_replica: replica.node_name.clone(),
-                    upstream_replica: upstream_name.to_string(),
+                    upstream_replica: upstream_name.to_owned(),
                 });
             }
         }
@@ -558,7 +556,7 @@ fn detect_chained_replica(
 fn get_timeline(node: &AnalyzedNode) -> Option<i32> {
     match &node.role {
         Role::Primary { health } => Some(health.timeline_id),
-        _ => None,
+        Role::Unknown | Role::UnknownPrimary | Role::UnknownReplica | Role::Replica { .. } => None,
     }
 }
 
@@ -566,13 +564,13 @@ fn get_timeline(node: &AnalyzedNode) -> Option<i32> {
 ///
 /// Used during split-brain resolution to categorize primaries by their timeline.
 struct TimelineInfo<'a> {
-    /// The highest timeline ID found among primaries
+    /// The highest timeline ID found among primaries.
     highest_timeline: i32,
-    /// The primary node with the highest timeline (first one if multiple)
+    /// The primary node with the highest timeline (first one if multiple).
     highest_timeline_node: &'a AnalyzedNode,
-    /// Primaries that share the highest timeline (could be multiple if equal)
+    /// Primaries that share the highest timeline (could be multiple if equal).
     primaries_with_highest_timeline: Vec<(&'a AnalyzedNode, i32)>,
-    /// Primaries with timelines lower than the highest (stale primaries)
+    /// Primaries with timelines lower than the highest (stale primaries).
     primaries_with_lower_timeline: Vec<(&'a AnalyzedNode, i32)>,
 }
 
@@ -620,8 +618,8 @@ fn extract_timeline_info<'a>(primaries: &[&'a AnalyzedNode]) -> TimelineInfo<'a>
 /// For each primary, checks if any replica's WAL receiver is connected to that
 /// primary's IP address (on port 5432). Returns a map from primary node name
 /// to the list of replica node names following it.
-fn build_replica_following_map<'a>(
-    timeline_info: &TimelineInfo<'a>,
+fn build_replica_following_map(
+    timeline_info: &TimelineInfo<'_>,
     replicas: &[&AnalyzedNode],
 ) -> HashMap<String, Vec<String>> {
     // First, build a map of sender (host:port) -> replica names
@@ -668,15 +666,15 @@ fn build_replica_following_map<'a>(
 /// 3. Replica evidence can override timeline if replicas follow a lower-timeline primary
 ///    (indicates the higher-timeline primary was isolated after promotion)
 fn determine_true_primary(
-    timeline_info: TimelineInfo<'_>,
-    replicas_following: HashMap<String, Vec<String>>,
+    timeline_info: &TimelineInfo<'_>,
+    replicas_following: &HashMap<String, Vec<String>>,
 ) -> SplitBrainInfo {
     if timeline_info.primaries_with_highest_timeline.len() == 1
         && !timeline_info.primaries_with_lower_timeline.is_empty()
     {
-        resolve_with_different_timelines(&timeline_info, &replicas_following)
+        resolve_with_different_timelines(timeline_info, replicas_following)
     } else if timeline_info.primaries_with_highest_timeline.len() > 1 {
-        resolve_with_equal_timelines(&timeline_info, &replicas_following)
+        resolve_with_equal_timelines(timeline_info, replicas_following)
     } else {
         // Single primary with highest timeline, no stale ones (shouldn't happen with >= 2 primaries)
         let stale_primaries: Vec<String> = timeline_info
@@ -719,7 +717,7 @@ fn resolve_with_different_timelines(
         if let Some(followers) = replicas_following.get(&stale_node.node_name)
             && !followers.is_empty()
         {
-            replicas_following_stale = followers.clone();
+            replicas_following_stale.clone_from(followers);
             stale_with_followers = Some(*stale_node);
             break;
         }
@@ -791,7 +789,7 @@ fn resolve_with_equal_timelines(
             && !followers.is_empty()
         {
             primary_with_followers = Some(*primary);
-            followers_list = followers.clone();
+            followers_list.clone_from(followers);
             break;
         }
     }
@@ -833,7 +831,7 @@ fn resolve_with_equal_timelines(
 ///
 /// Resolution strategy:
 /// 1. Compare timelines - higher timeline = more recent promotion
-/// 2. Check which primary the replicas are streaming from (received_tli)
+/// 2. Check which primary the replicas are streaming from (`received_tli`)
 /// 3. If both agree, high confidence. If they disagree, prefer replica evidence.
 fn resolve_split_brain(primaries: &[&AnalyzedNode], replicas: &[&AnalyzedNode]) -> SplitBrainInfo {
     assert!(
@@ -843,15 +841,15 @@ fn resolve_split_brain(primaries: &[&AnalyzedNode], replicas: &[&AnalyzedNode]) 
 
     let timeline_info = extract_timeline_info(primaries);
     let replicas_following = build_replica_following_map(&timeline_info, replicas);
-    determine_true_primary(timeline_info, replicas_following)
+    determine_true_primary(&timeline_info, &replicas_following)
 }
 
-/// Inspect disk_check results on each node and upgrade ClusterHealth if warranted.
+/// Inspect `disk_check` results on each node and upgrade `ClusterHealth` if warranted.
 ///
 /// Rules (in priority order):
 /// - Unknown and Critical (pg-based): left unchanged
-/// - Any node has filesystem_errors > 0: upgrade to Critical { FilesystemErrors }
-/// - Any node has io/block errors, and current health is Healthy: upgrade to Degraded { DiskIoErrors }
+/// - Any node has `filesystem_errors` > 0: upgrade to Critical { `FilesystemErrors` }
+/// - Any node has io/block errors, and current health is Healthy: upgrade to Degraded { `DiskIoErrors` }
 fn apply_disk_verdict(health: ClusterHealth) -> ClusterHealth {
     use crate::v2::scan::disk_check::DiskCheckOutcome;
 
@@ -867,6 +865,7 @@ fn apply_disk_verdict(health: ClusterHealth) -> ClusterHealth {
         let mut worst_fs: Option<(String, u32)> = None;
         let mut worst_io: Option<(String, u32, u32)> = None;
 
+        #[expect(clippy::needless_else, reason = "conflicting lints")]
         for node in &cluster_ref.cluster.nodes {
             if let Some(DiskCheckOutcome::Checked(result)) = &node.disk_check {
                 if result.filesystem_errors > 0 {
@@ -882,6 +881,7 @@ fn apply_disk_verdict(health: ClusterHealth) -> ClusterHealth {
                         result.io_errors,
                         result.block_errors,
                     ));
+                } else {
                 }
             }
         }
@@ -894,9 +894,10 @@ fn apply_disk_verdict(health: ClusterHealth) -> ClusterHealth {
 
     if let Some((node, count)) = worst_fs {
         let cluster = match health {
-            ClusterHealth::Healthy { cluster, .. } => cluster,
-            ClusterHealth::Degraded { cluster, .. } => cluster,
-            _ => return health,
+            ClusterHealth::Healthy { cluster, .. } | ClusterHealth::Degraded { cluster, .. } => {
+                cluster
+            }
+            ClusterHealth::Critical { .. } | ClusterHealth::Unknown { .. } => return health,
         };
         return ClusterHealth::Critical {
             cluster,
@@ -920,9 +921,9 @@ fn apply_disk_verdict(health: ClusterHealth) -> ClusterHealth {
     health
 }
 
-/// Calculate byte difference between two PostgreSQL LSNs
+/// Calculate byte difference between two `PostgreSQL` LSNs
 /// LSN format: "XXX/YYYYYYYY" where both parts are hexadecimal
-/// Returns None if LSNs are invalid
+/// Returns None if LSNs are invalid.
 fn pg_lsn_diff(lsn1: &str, lsn2: &str) -> Option<u64> {
     fn parse_lsn(lsn: &str) -> Option<u64> {
         let parts: Vec<&str> = lsn.split('/').collect();
@@ -941,11 +942,17 @@ fn pg_lsn_diff(lsn1: &str, lsn2: &str) -> Option<u64> {
     Some(pos1.abs_diff(pos2))
 }
 
-/// Estimate pg_basebackup progress by comparing primary DB size vs replica filesystem usage
-/// Returns progress as u16 (percentage * 100, e.g., 4156 = 41.56%)
+/// Estimate `pg_basebackup` progress by comparing primary DB size vs replica filesystem usage
+/// Returns progress as u16 (percentage * 100, e.g., 4156 = 41.56%).
 ///
 /// This is a rough estimate assuming the used bytes on the replica are mostly from the backup.
 /// This may be inaccurate if there's other data on the filesystem.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "it's an estimate, not the math olympiad"
+)]
 fn estimate_backup_progress(primary_used_bytes: u64, replica_used_bytes: u64) -> u16 {
     if primary_used_bytes == 0 {
         return 0;
@@ -957,21 +964,21 @@ fn estimate_backup_progress(primary_used_bytes: u64, replica_used_bytes: u64) ->
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct AnalyzedCluster {
-    pub(crate) cluster: Cluster,
-    /// Backup progress for pg_basebackup connections, mapped by client_addr
-    /// Key: client IP address, Value: progress (pct * 100, e.g., 4156 = 41.56%)
+    pub cluster: Cluster,
+    /// Backup progress for `pg_basebackup` connections, mapped by `client_addr`
+    /// Key: client IP address, Value: progress (pct * 100, e.g., 4156 = 41.56%).
     pub backup_progress: HashMap<String, u16>,
 }
 
 impl AnalyzedCluster {
-    /// Get the cluster name
+    /// Get the cluster name.
     pub fn name(&self) -> &str {
         &self.cluster.name
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
-/// Represents the overall health of the PostgreSQL cluster.
+/// Represents the overall health of the `PostgreSQL` cluster.
 pub enum ClusterHealth {
     /// ✅ The cluster is fully operational and redundant.
     ///
@@ -1001,9 +1008,9 @@ pub enum ClusterHealth {
     /// - **Split Brain:** The monitor detects more than one active primary.
     ///   While we do have quorum synchronous commit enabled, this is still a
     ///   dangerous state that requires immediate attention.
-    /// - **WritesBlocked:** Primary has sync_commit=on but no sync replicas to satisfy quorum.
-    /// - **WritesUnprotected:** Primary has sync_commit=off with no replicas (DR mode).
-    /// - **NoPrimary:** No primary found in the cluster.
+    /// - **`WritesBlocked`:** Primary has `sync_commit=on` but no sync replicas to satisfy quorum.
+    /// - **`WritesUnprotected`:** Primary has `sync_commit=off` with no replicas (DR mode).
+    /// - **`NoPrimary`:** No primary found in the cluster.
     Critical {
         cluster: AnalyzedCluster,
         reason: Reason,
@@ -1021,7 +1028,7 @@ pub enum ClusterHealth {
 }
 
 impl ClusterHealth {
-    /// Returns a reference to the analyzed cluster
+    /// Returns a reference to the analyzed cluster.
     pub fn cluster(&self) -> &AnalyzedCluster {
         match self {
             ClusterHealth::Healthy { cluster, .. }
@@ -1037,93 +1044,93 @@ pub enum Reason {
     // Degraded reasons
     OneReplicaDown,
     HighReplicationLag,
-    /// A replica has wal_receiver = None, indicating it's rebuilding or disconnected
+    /// A replica has `wal_receiver` = None, indicating it's rebuilding or disconnected.
     RebuildingReplica,
-    /// A replica is replicating from another replica instead of the primary (cascading replication)
+    /// A replica is replicating from another replica instead of the primary (cascading replication).
     ChainedReplica {
-        /// The replica that is chained (replicating from another replica)
+        /// The replica that is chained (replicating from another replica).
         chained_replica: String,
-        /// The upstream replica it's replicating from
+        /// The upstream replica it's replicating from.
         upstream_replica: String,
     },
-    /// One or more streaming replicas have a sync_state other than `quorum`
+    /// One or more streaming replicas have a `sync_state` other than `quorum`.
     NotInQuorum {
-        /// application_name of each replica whose sync_state is not Quorum
+        /// `application_name` of each replica whose `sync_state` is not Quorum.
         replicas: Vec<String>,
     },
 
     // Critical reasons
-    /// No primary found in the cluster
+    /// No primary found in the cluster.
     NoPrimary,
-    /// Multiple nodes return pg_is_in_recovery() = false
+    /// Multiple nodes return `pg_is_in_recovery()` = false.
     SplitBrain(SplitBrainInfo),
-    /// Primary has sync_commit=on but no sync replicas - writes are blocked
+    /// Primary has `sync_commit=on` but no sync replicas - writes are blocked.
     WritesBlocked,
-    /// Primary has sync_commit=off with no replicas - DR mode, no redundancy
+    /// Primary has `sync_commit=off` with no replicas - DR mode, no redundancy.
     WritesUnprotected,
-    /// Archive command has never succeeded since becoming primary
+    /// Archive command has never succeeded since becoming primary.
     ArchiveFailure {
         failed_count: i64,
         last_failed_wal: Option<String>,
     },
 
     // Unknown reasons
-    /// Cannot connect to any nodes in the cluster
+    /// Cannot connect to any nodes in the cluster.
     NoNodesReachable,
-    /// Cluster has unexpected topology (e.g., more than 3 nodes)
+    /// Cluster has unexpected topology (e.g., more than 3 nodes).
     UnexpectedTopology,
 
     // Disk reasons (from dmesg within the recency window)
-    /// I/O or block-device errors found in dmesg
+    /// I/O or block-device errors found in dmesg.
     DiskIoErrors {
         node: String,
         io_errors: u32,
         block_errors: u32,
     },
-    /// Filesystem-level errors found in dmesg
+    /// Filesystem-level errors found in dmesg.
     FilesystemErrors {
         node: String,
         count: u32,
     },
 }
 
-/// Information about a split-brain scenario and its resolution
+/// Information about a split-brain scenario and its resolution.
 #[derive(Debug, Eq, PartialEq)]
 pub struct SplitBrainInfo {
-    /// The node determined to be the true primary based on timeline analysis
+    /// The node determined to be the true primary based on timeline analysis.
     pub true_primary: String,
-    /// The node(s) that are stale primaries (should be demoted)
+    /// The node(s) that are stale primaries (should be demoted).
     pub stale_primaries: Vec<String>,
-    /// How the true primary was determined
+    /// How the true primary was determined.
     pub resolution: SplitBrainResolution,
 }
 
-/// How split-brain was resolved
+/// How split-brain was resolved.
 #[derive(Debug, Eq, PartialEq)]
 pub enum SplitBrainResolution {
-    /// Higher timeline indicates the true primary (most recent promotion)
+    /// Higher timeline indicates the true primary (most recent promotion).
     HigherTimeline {
         true_primary_timeline: i32,
         stale_timeline: i32,
     },
-    /// Replicas are streaming from the true primary
+    /// Replicas are streaming from the true primary.
     ReplicaFollowing {
         replicas_following_true: Vec<String>,
     },
-    /// Both timeline and replica evidence agree
+    /// Both timeline and replica evidence agree.
     Both {
         true_primary_timeline: i32,
         stale_timeline: i32,
         replicas_following_true: Vec<String>,
     },
     /// Replica evidence overrides timeline - replicas are following a lower-timeline primary
-    /// This indicates the higher-timeline primary was likely isolated after promotion
+    /// This indicates the higher-timeline primary was likely isolated after promotion.
     ReplicaOverridesTimeline {
         true_primary_timeline: i32,
         stale_timeline: i32,
         replicas_following_true: Vec<String>,
     },
-    /// Cannot determine true primary - timelines equal, no replica evidence
+    /// Cannot determine true primary - timelines equal, no replica evidence.
     Indeterminate,
 }
 
@@ -1132,7 +1139,7 @@ mod tests {
     use super::*;
     use crate::v2::{
         tests_common::{healthy, unhealthy},
-        writer::parse_lag_to_bytes,
+        writer::units::parse_lag_to_bytes,
     };
 
     use pretty_assertions::assert_eq;
@@ -1197,8 +1204,8 @@ mod tests {
                 backup_progress: HashMap::new(),
             },
             reason: Reason::ChainedReplica {
-                chained_replica: "dev-pg-app001-db003.sto3.example.com".to_string(),
-                upstream_replica: "dev-pg-app001-db002.sto2.example.com".to_string(),
+                chained_replica: "dev-pg-app001-db003.sto3.example.com".to_owned(),
+                upstream_replica: "dev-pg-app001-db002.sto2.example.com".to_owned(),
             },
         };
         assert_eq!(actual, expected);
@@ -1461,11 +1468,11 @@ mod cluster_state_tests {
                 backup_progress: HashMap::new(),
             },
             reason: Reason::SplitBrain(SplitBrainInfo {
-                true_primary: "dev-pg-app001-db001.sto1.example.com".to_string(),
-                stale_primaries: vec!["dev-pg-app001-db002.sto2.example.com".to_string()],
+                true_primary: "dev-pg-app001-db001.sto1.example.com".to_owned(),
+                stale_primaries: vec!["dev-pg-app001-db002.sto2.example.com".to_owned()],
                 resolution: SplitBrainResolution::ReplicaFollowing {
                     replicas_following_true: vec![
-                        "dev-pg-app001-db003.sto3.example.com".to_string(),
+                        "dev-pg-app001-db003.sto3.example.com".to_owned(),
                     ],
                 },
             }),
@@ -1504,8 +1511,8 @@ mod cluster_state_tests {
             },
             reason: Reason::SplitBrain(SplitBrainInfo {
                 // db001 is first in iteration order, but resolution is indeterminate
-                true_primary: "dev-pg-app001-db001.sto1.example.com".to_string(),
-                stale_primaries: vec!["dev-pg-app001-db002.sto2.example.com".to_string()],
+                true_primary: "dev-pg-app001-db001.sto1.example.com".to_owned(),
+                stale_primaries: vec!["dev-pg-app001-db002.sto2.example.com".to_owned()],
                 resolution: SplitBrainResolution::Indeterminate,
             }),
         };
@@ -1542,8 +1549,8 @@ mod cluster_state_tests {
                 backup_progress: HashMap::new(),
             },
             reason: Reason::SplitBrain(SplitBrainInfo {
-                true_primary: "dev-pg-app001-db002.sto2.example.com".to_string(),
-                stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_string()],
+                true_primary: "dev-pg-app001-db002.sto2.example.com".to_owned(),
+                stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_owned()],
                 resolution: SplitBrainResolution::HigherTimeline {
                     true_primary_timeline: 12,
                     stale_timeline: 11,
@@ -1561,21 +1568,21 @@ mod cluster_state_tests {
         let replica_health = ReplicaHealthCheckResult {
             timeline_id: 12,
             wal_receiver: Some(WalReceiverInfo {
-                pid: 4053449,
-                status: "streaming".to_string(),
-                receive_start_lsn: "47F/67000000".to_string(),
+                pid: 4_053_449,
+                status: "streaming".to_owned(),
+                receive_start_lsn: "47F/67000000".to_owned(),
                 receive_start_tli: 12,
-                written_lsn: "48F/6957B540".to_string(),
-                flushed_lsn: "48F/6957B540".to_string(),
+                written_lsn: "48F/6957B540".to_owned(),
+                flushed_lsn: "48F/6957B540".to_owned(),
                 received_tli: 12,
                 last_msg_send_time: Some(Utc::now()),
                 last_msg_receipt_time: Some(Utc::now()),
-                latest_end_lsn: "48F/6957B540".to_string(),
+                latest_end_lsn: "48F/6957B540".to_owned(),
                 latest_end_time: Some(Utc::now()),
                 slot_name: None,
-                sender_host: "127.2.12.151".to_string(), // db002's IP
+                sender_host: "127.2.12.151".to_owned(), // db002's IP
                 sender_port: 5432,
-                conninfo: "user=replicator host=127.2.12.151".to_string(),
+                conninfo: "user=replicator host=127.2.12.151".to_owned(),
             }),
             lag: LagInfo {
                 apply_lag_bytes: Some(0),
@@ -1619,13 +1626,13 @@ mod cluster_state_tests {
                 backup_progress: HashMap::new(),
             },
             reason: Reason::SplitBrain(SplitBrainInfo {
-                true_primary: "dev-pg-app001-db002.sto2.example.com".to_string(),
-                stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_string()],
+                true_primary: "dev-pg-app001-db002.sto2.example.com".to_owned(),
+                stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_owned()],
                 resolution: SplitBrainResolution::Both {
                     true_primary_timeline: 12,
                     stale_timeline: 11,
                     replicas_following_true: vec![
-                        "dev-pg-app001-db003.sto3.example.com".to_string(),
+                        "dev-pg-app001-db003.sto3.example.com".to_owned(),
                     ],
                 },
             }),
@@ -1642,21 +1649,21 @@ mod cluster_state_tests {
         let replica_health = ReplicaHealthCheckResult {
             timeline_id: 11,
             wal_receiver: Some(WalReceiverInfo {
-                pid: 4053449,
-                status: "streaming".to_string(),
-                receive_start_lsn: "47F/67000000".to_string(),
+                pid: 4_053_449,
+                status: "streaming".to_owned(),
+                receive_start_lsn: "47F/67000000".to_owned(),
                 receive_start_tli: 11, // Following timeline 11 (db001)
-                written_lsn: "48F/6957B540".to_string(),
-                flushed_lsn: "48F/6957B540".to_string(),
+                written_lsn: "48F/6957B540".to_owned(),
+                flushed_lsn: "48F/6957B540".to_owned(),
                 received_tli: 11,
                 last_msg_send_time: Some(Utc::now()),
                 last_msg_receipt_time: Some(Utc::now()),
-                latest_end_lsn: "48F/6957B540".to_string(),
+                latest_end_lsn: "48F/6957B540".to_owned(),
                 latest_end_time: Some(Utc::now()),
                 slot_name: None,
-                sender_host: "127.1.12.151".to_string(), // db001's IP
+                sender_host: "127.1.12.151".to_owned(), // db001's IP
                 sender_port: 5432,
-                conninfo: "user=replicator host=127.1.12.151".to_string(),
+                conninfo: "user=replicator host=127.1.12.151".to_owned(),
             }),
             lag: LagInfo {
                 apply_lag_bytes: Some(0),
@@ -1702,13 +1709,13 @@ mod cluster_state_tests {
                 backup_progress: HashMap::new(),
             },
             reason: Reason::SplitBrain(SplitBrainInfo {
-                true_primary: "dev-pg-app001-db001.sto1.example.com".to_string(),
-                stale_primaries: vec!["dev-pg-app001-db002.sto2.example.com".to_string()],
+                true_primary: "dev-pg-app001-db001.sto1.example.com".to_owned(),
+                stale_primaries: vec!["dev-pg-app001-db002.sto2.example.com".to_owned()],
                 resolution: SplitBrainResolution::ReplicaOverridesTimeline {
                     true_primary_timeline: 11,
                     stale_timeline: 12,
                     replicas_following_true: vec![
-                        "dev-pg-app001-db003.sto3.example.com".to_string(),
+                        "dev-pg-app001-db003.sto3.example.com".to_owned(),
                     ],
                 },
             }),
@@ -1727,21 +1734,21 @@ mod cluster_state_tests {
         let replica_health = ReplicaHealthCheckResult {
             timeline_id: 13,
             wal_receiver: Some(WalReceiverInfo {
-                pid: 2727816,
-                status: "streaming".to_string(),
-                receive_start_lsn: "281/7D000000".to_string(),
+                pid: 2_727_816,
+                status: "streaming".to_owned(),
+                receive_start_lsn: "281/7D000000".to_owned(),
                 receive_start_tli: 13,
-                written_lsn: "281/BAAA6510".to_string(),
-                flushed_lsn: "281/BAAA6510".to_string(),
+                written_lsn: "281/BAAA6510".to_owned(),
+                flushed_lsn: "281/BAAA6510".to_owned(),
                 received_tli: 13,
                 last_msg_send_time: Some(Utc::now()),
                 last_msg_receipt_time: Some(Utc::now()),
-                latest_end_lsn: "281/BAAA6510".to_string(),
+                latest_end_lsn: "281/BAAA6510".to_owned(),
                 latest_end_time: Some(Utc::now()),
                 slot_name: None,
-                sender_host: "127.2.12.162".to_string(), // db002's IP - following new primary
+                sender_host: "127.2.12.162".to_owned(), // db002's IP - following new primary
                 sender_port: 5432,
-                conninfo: "user=replicator host=127.2.12.162".to_string(),
+                conninfo: "user=replicator host=127.2.12.162".to_owned(),
             }),
             lag: LagInfo {
                 apply_lag_bytes: Some(0),
@@ -1789,11 +1796,11 @@ mod cluster_state_tests {
                 backup_progress: HashMap::new(),
             },
             reason: Reason::SplitBrain(SplitBrainInfo {
-                true_primary: "dev-pg-app001-db002.sto2.example.com".to_string(),
-                stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_string()],
+                true_primary: "dev-pg-app001-db002.sto2.example.com".to_owned(),
+                stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_owned()],
                 resolution: SplitBrainResolution::ReplicaFollowing {
                     replicas_following_true: vec![
-                        "dev-pg-app001-db003.sto3.example.com".to_string(),
+                        "dev-pg-app001-db003.sto3.example.com".to_owned(),
                     ],
                 },
             }),
@@ -1969,7 +1976,7 @@ mod cluster_state_tests {
         // Scenario: Primary with sync_commit=on (default) but no replicas
         // This means writes will block waiting for quorum
         let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_string(), "on".to_string());
+        config.insert("synchronous_commit".to_owned(), "on".to_owned());
 
         let cluster = make_cluster(vec![
             make_node(
@@ -2000,7 +2007,7 @@ mod cluster_state_tests {
         // Scenario: Primary with sync_commit=off and no replicas (DR mode)
         // Writes succeed but no redundancy
         let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_string(), "off".to_string());
+        config.insert("synchronous_commit".to_owned(), "off".to_owned());
 
         let cluster = make_cluster(vec![
             make_node(
@@ -2030,7 +2037,7 @@ mod cluster_state_tests {
     fn test_critical_writes_unprotected_sync_commit_local() {
         // Scenario: Primary with sync_commit=local (equivalent to off for replication)
         let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_string(), "local".to_string());
+        config.insert("synchronous_commit".to_owned(), "local".to_owned());
 
         let cluster = make_cluster(vec![
             make_node(
@@ -2064,8 +2071,8 @@ mod cluster_state_tests {
         // This is effectively unprotected writes (DR mode / misconfiguration).
         // See: https://postgresqlco.nf/doc/en/param/synchronous_commit/
         let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_string(), "remote_apply".to_string());
-        config.insert("synchronous_standby_names".to_string(), "".to_string());
+        config.insert("synchronous_commit".to_owned(), "remote_apply".to_owned());
+        config.insert("synchronous_standby_names".to_owned(), String::new());
 
         let cluster = make_cluster(vec![
             make_node(
@@ -2099,15 +2106,15 @@ mod cluster_state_tests {
         // can't reconnect (e.g., broken prev-link, WAL issues).
         // Even though replicas are visible, no replication is happening.
         let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_string(), "remote_apply".to_string());
-        config.insert("synchronous_standby_names".to_string(), "".to_string());
+        config.insert("synchronous_commit".to_owned(), "remote_apply".to_owned());
+        config.insert("synchronous_standby_names".to_owned(), String::new());
 
         // Replica health with no wal_receiver (disconnected)
         let disconnected_replica = ReplicaHealthCheckResult {
             timeline_id: 18,
             wal_receiver: None,
             lag: LagInfo {
-                apply_lag_bytes: Some(131072),
+                apply_lag_bytes: Some(0x0002_0000),
                 last_transaction_replay_at: Some(Utc::now()),
             },
             conflicts_by_db: HashMap::new(),
@@ -2155,10 +2162,10 @@ mod cluster_state_tests {
         // Scenario: Primary with archive_mode=on but archiving has never succeeded
         // archived_count=0 with failed_count > 0 means archive command never worked
         let mut config = HashMap::new();
-        config.insert("archive_mode".to_string(), "on".to_string());
+        config.insert("archive_mode".to_owned(), "on".to_owned());
         config.insert(
-            "archive_command".to_string(),
-            "/usr/bin/pgbackrest --stanza=dev-pg-app001 archive-push %p".to_string(),
+            "archive_command".to_owned(),
+            "/usr/bin/pgbackrest --stanza=dev-pg-app001 archive-push %p".to_owned(),
         );
 
         let archiver = ArchiverStats {
@@ -2166,7 +2173,7 @@ mod cluster_state_tests {
             failed_count: 16452,
             last_archived_wal: None,
             last_archived_time: None,
-            last_failed_wal: Some("000000120000058300000073".to_string()),
+            last_failed_wal: Some("000000120000058300000073".to_owned()),
             last_failed_time: None,
         };
 
@@ -2208,7 +2215,7 @@ mod cluster_state_tests {
             },
             reason: Reason::ArchiveFailure {
                 failed_count: 16452,
-                last_failed_wal: Some("000000120000058300000073".to_string()),
+                last_failed_wal: Some("000000120000058300000073".to_owned()),
             },
         };
 
@@ -2222,8 +2229,8 @@ mod cluster_state_tests {
         // Mirrors the real dump: synchronous_commit=on, synchronous_standby_names="",
         // both replicas streaming with sync_state=async. Cluster must be Degraded.
         let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_string(), "on".to_string());
-        config.insert("synchronous_standby_names".to_string(), "".to_string());
+        config.insert("synchronous_commit".to_owned(), "on".to_owned());
+        config.insert("synchronous_standby_names".to_owned(), String::new());
 
         let primary_health = PrimaryHealthBuilder::new()
             .with_replication(2)
@@ -2264,8 +2271,8 @@ mod cluster_state_tests {
             },
             reason: Reason::NotInQuorum {
                 replicas: vec![
-                    "dev_pg_app001_db002".to_string(),
-                    "dev_pg_app001_db003".to_string(),
+                    "dev_pg_app001_db002".to_owned(),
+                    "dev_pg_app001_db003".to_owned(),
                 ],
             },
         };
@@ -2324,7 +2331,7 @@ mod cluster_state_tests {
     #[test]
     fn test_is_sync_commit_off_returns_true_for_off() {
         let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_string(), "off".to_string());
+        config.insert("synchronous_commit".to_owned(), "off".to_owned());
 
         let node = make_node(
             1,
@@ -2340,7 +2347,7 @@ mod cluster_state_tests {
     #[test]
     fn test_is_sync_commit_off_returns_true_for_local() {
         let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_string(), "local".to_string());
+        config.insert("synchronous_commit".to_owned(), "local".to_owned());
 
         let node = make_node(
             1,
@@ -2356,7 +2363,7 @@ mod cluster_state_tests {
     #[test]
     fn test_is_sync_commit_off_returns_false_for_on() {
         let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_string(), "on".to_string());
+        config.insert("synchronous_commit".to_owned(), "on".to_owned());
 
         let node = make_node(
             1,
@@ -2372,7 +2379,7 @@ mod cluster_state_tests {
     #[test]
     fn test_is_sync_commit_off_returns_false_for_remote_write() {
         let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_string(), "remote_write".to_string());
+        config.insert("synchronous_commit".to_owned(), "remote_write".to_owned());
 
         let node = make_node(
             1,
@@ -2388,7 +2395,7 @@ mod cluster_state_tests {
     #[test]
     fn test_is_sync_commit_off_returns_false_for_remote_apply() {
         let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_string(), "remote_apply".to_string());
+        config.insert("synchronous_commit".to_owned(), "remote_apply".to_owned());
 
         let node = make_node(
             1,
@@ -2441,18 +2448,14 @@ mod cluster_state_tests {
         n
     }
 
-    fn checked(
-        io: u32,
-        fs: u32,
-        blk: u32,
-    ) -> Option<crate::v2::scan::disk_check::DiskCheckOutcome> {
+    fn checked(io: u32, fs: u32, blk: u32) -> crate::v2::scan::disk_check::DiskCheckOutcome {
         use crate::v2::scan::disk_check::{DiskCheckOutcome, DiskCheckResult};
-        Some(DiskCheckOutcome::Checked(DiskCheckResult {
+        DiskCheckOutcome::Checked(DiskCheckResult {
             io_errors: io,
             filesystem_errors: fs,
             block_errors: blk,
             sample_messages: vec![],
-        }))
+        })
     }
 
     #[test]
@@ -2464,7 +2467,7 @@ mod cluster_state_tests {
                 Role::Primary {
                     health: Box::new(make_primary_health(2, None)),
                 },
-                checked(2, 0, 1),
+                Some(checked(2, 0, 1)),
             ),
             make_node_with_disk(
                 2,
@@ -2472,7 +2475,7 @@ mod cluster_state_tests {
                 Role::Replica {
                     health: Box::new(make_replica_health()),
                 },
-                checked(0, 0, 0),
+                Some(checked(0, 0, 0)),
             ),
             make_node_with_disk(
                 3,
@@ -2480,7 +2483,7 @@ mod cluster_state_tests {
                 Role::Replica {
                     health: Box::new(make_replica_health()),
                 },
-                checked(0, 0, 0),
+                Some(checked(0, 0, 0)),
             ),
         ]);
 
@@ -2510,7 +2513,7 @@ mod cluster_state_tests {
                 Role::Primary {
                     health: Box::new(make_primary_health(2, None)),
                 },
-                checked(0, 3, 0),
+                Some(checked(0, 3, 0)),
             ),
             make_node_with_disk(
                 2,
@@ -2518,7 +2521,7 @@ mod cluster_state_tests {
                 Role::Replica {
                     health: Box::new(make_replica_health()),
                 },
-                checked(0, 0, 0),
+                Some(checked(0, 0, 0)),
             ),
             make_node_with_disk(
                 3,
@@ -2526,7 +2529,7 @@ mod cluster_state_tests {
                 Role::Replica {
                     health: Box::new(make_replica_health()),
                 },
-                checked(0, 0, 0),
+                Some(checked(0, 0, 0)),
             ),
         ]);
 
@@ -2553,7 +2556,7 @@ mod cluster_state_tests {
                 Role::Primary {
                     health: Box::new(make_primary_health(1, None)),
                 },
-                checked(0, 2, 0),
+                Some(checked(0, 2, 0)),
             ),
             make_node_with_disk(
                 2,
@@ -2561,7 +2564,7 @@ mod cluster_state_tests {
                 Role::Replica {
                     health: Box::new(make_replica_health()),
                 },
-                checked(0, 0, 0),
+                Some(checked(0, 0, 0)),
             ),
             make_node_with_disk(
                 3,
@@ -2594,7 +2597,7 @@ mod cluster_state_tests {
                 Role::Primary {
                     health: Box::new(make_primary_health(1, None)),
                 },
-                checked(5, 0, 2),
+                Some(checked(5, 0, 2)),
             ),
             make_node_with_disk(
                 2,
@@ -2602,7 +2605,7 @@ mod cluster_state_tests {
                 Role::Replica {
                     health: Box::new(make_replica_health()),
                 },
-                checked(0, 0, 0),
+                Some(checked(0, 0, 0)),
             ),
             make_node_with_disk(
                 3,
@@ -2635,7 +2638,7 @@ mod cluster_state_tests {
                 Role::Replica {
                     health: Box::new(make_replica_health()),
                 },
-                checked(0, 5, 0),
+                Some(checked(0, 5, 0)),
             ),
             make_node_with_disk(
                 2,
@@ -2643,7 +2646,7 @@ mod cluster_state_tests {
                 Role::Replica {
                     health: Box::new(make_replica_health()),
                 },
-                checked(0, 0, 0),
+                Some(checked(0, 0, 0)),
             ),
             make_node_with_disk(
                 3,
@@ -2651,7 +2654,7 @@ mod cluster_state_tests {
                 Role::Replica {
                     health: Box::new(make_replica_health()),
                 },
-                checked(0, 0, 0),
+                Some(checked(0, 0, 0)),
             ),
         ]);
 
@@ -2679,7 +2682,7 @@ mod cluster_state_tests {
                     health: Box::new(make_primary_health(2, None)),
                 },
                 Some(DiskCheckOutcome::Failed {
-                    reason: "SSH timeout".to_string(),
+                    reason: "SSH timeout".to_owned(),
                 }),
             ),
             make_node_with_disk(
@@ -2710,8 +2713,8 @@ mod cluster_state_tests {
     #[test]
     #[cfg(feature = "prometheus")]
     fn test_estimate_backup_progress() {
-        let replica_used_bytes = 415_626_584_064u64; // ~415 GB
-        let primary_db_size = 1_000_000_000_000u64; // 1 TB
+        let replica_used_bytes = 415_626_584_064_u64; // ~415 GB
+        let primary_db_size = 1_000_000_000_000_u64; // 1 TB
 
         let progress_pct = estimate_backup_progress(primary_db_size, replica_used_bytes);
 

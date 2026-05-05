@@ -34,7 +34,7 @@ pub struct PrometheusResult {
 
 impl PrometheusResult {
     /// Gets the ip address (instance key) and the bytes value from the prometheus
-    /// result
+    /// result.
     pub fn get_bytes(&self) -> Option<(String, u64)> {
         let value: u64 = match self.value.1.parse() {
             Ok(v) => v,
@@ -60,7 +60,7 @@ impl PrometheusResult {
             return None;
         }
 
-        Some((ip.to_string(), value))
+        Some((ip.to_owned(), value))
     }
 }
 
@@ -70,7 +70,7 @@ pub enum Query {
 }
 
 impl Query {
-    /// Creates a prometheus PromQL query with the given host
+    /// Creates a prometheus `PromQL` query with the given host.
     pub fn with_host(&self, host: &str) -> String {
         match self {
             Query::SizeBytes => {
@@ -94,32 +94,29 @@ mod tests {
     #[test]
     fn test_report_prometheus_result_ok() {
         let mut metric = HashMap::new();
-        metric.insert("instance".to_string(), "127.3.18.28:9999".to_string());
+        metric.insert("instance".to_owned(), "127.3.18.28:9999".to_owned());
 
         // (Timestamp, Value)
-        let value = (2000f64, "415626584064".to_string());
-        let res = PrometheusResult { value, metric };
+        let value = (2000_f64, "415626584064".to_owned());
+        let res = PrometheusResult { metric, value };
 
         let actual = res.get_bytes();
-        let expected = Some(("127.3.18.28".to_string(), 415626584064u64));
+        let expected = Some(("127.3.18.28".to_owned(), 415_626_584_064_u64));
 
-        assert_eq!(actual, expected)
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_report_prometheus_missing() {
         let mut metric = HashMap::new();
-        metric.insert(
-            "not_instance_key".to_string(),
-            "127.3.18.28:9999".to_string(),
-        );
+        metric.insert("not_instance_key".to_owned(), "127.3.18.28:9999".to_owned());
 
-        let value = (2000f64, "415626584064".to_string());
-        let res = PrometheusResult { value, metric };
+        let value = (2000_f64, "415626584064".to_owned());
+        let res = PrometheusResult { metric, value };
 
         let actual = res.get_bytes();
         let expected = None;
 
-        assert_eq!(actual, expected)
+        assert_eq!(actual, expected);
     }
 }
