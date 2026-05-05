@@ -2,6 +2,11 @@
 name = "db-scan"
 version = "0.1.0"
 edition = "2024"
+description = "PostgreSQL cluster health monitoring tool that scans, analyzes, and reports on streaming replication health."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/robert-sjoblom/db-scan"
+keywords = ["postgres", "postgresql", "replication", "monitoring", "cli"]
+categories = ["command-line-utilities", "database"]
 
 [lints.clippy]
 all = "warn"

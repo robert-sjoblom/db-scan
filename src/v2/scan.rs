@@ -33,6 +33,10 @@ pub async fn scan_nodes(
     futures::future::join_all(handles).await;
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "refactoring just for line count is bad practice"
+)]
 #[instrument(skip(tx), level = "debug", fields(node_name = %node.node_name, node_id = node.id))]
 async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
     let node = Arc::from(node);
