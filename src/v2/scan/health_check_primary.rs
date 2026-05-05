@@ -173,7 +173,7 @@ static HEALTH_CHECK_PRIMARY_QUERY: &str = "SELECT jsonb_build_object(
     )
 )::text;";
 
-#[instrument(skip(client, tx), level = "debug", fields(node_name = %node.node_name))]
+#[instrument(skip(client, tx), level = "debug", fields(node_name = %node.name))]
 pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<AnalyzedNode>) {
     tracing::info!("starting primary health check");
 
@@ -190,7 +190,7 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
             AnalyzedNode {
                 id: node.id,
                 cluster_id: node.cluster_id,
-                node_name: node.node_name.clone(),
+                node_name: node.name.clone(),
                 pg_version: node.pg_version.clone(),
                 ip_address: node.ip_address,
                 role: Role::Primary {
@@ -206,7 +206,7 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
             AnalyzedNode {
                 id: node.id,
                 cluster_id: node.cluster_id,
-                node_name: node.node_name.clone(),
+                node_name: node.name.clone(),
                 pg_version: node.pg_version.clone(),
                 ip_address: node.ip_address,
                 role: Role::UnknownPrimary,
@@ -219,9 +219,9 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
     tracing::trace!(result = ?analyzed, "Primary health check raw result");
 
     match tx.send(analyzed) {
-        Ok(()) => tracing::trace!(node_name = %node.node_name, "health checked primary node"),
+        Ok(()) => tracing::trace!(node_name = %node.name, "health checked primary node"),
         Err(e) => {
-            tracing::error!(node_name = %node.node_name, error = %e, "failed to send health checked primary node");
+            tracing::error!(node_name = %node.name, error = %e, "failed to send health checked primary node");
         }
     }
 }

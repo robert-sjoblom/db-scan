@@ -37,7 +37,7 @@ pub async fn scan_nodes(
     clippy::too_many_lines,
     reason = "refactoring just for line count is bad practice"
 )]
-#[instrument(skip(tx), level = "debug", fields(node_name = %node.node_name, node_id = node.id))]
+#[instrument(skip(tx), level = "debug", fields(node_name = %node.name, node_id = node.id))]
 async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
     let node = Arc::from(node);
     let config = get_config();
@@ -62,7 +62,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                 Ok((client, conn)) => {
                     if attempt > 1 {
                         tracing::info!(
-                            node_name = %node.node_name,
+                            node_name = %node.name,
                             attempt = attempt,
                             max_attempts = 3,
                             "successfully connected after retry"
@@ -73,7 +73,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                 Err(e) => {
                     if attempt < 3 {
                         tracing::warn!(
-                            node_name = %node.node_name,
+                            node_name = %node.name,
                             attempt = attempt,
                             max_attempts = 3,
                             error = %e,
@@ -82,7 +82,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     } else {
                         tracing::error!(
-                            node_name = %node.node_name,
+                            node_name = %node.name,
                             attempt = attempt,
                             max_attempts = 3,
                             error = %e,
@@ -100,16 +100,16 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
         if let Ok(()) = tx.send(AnalyzedNode {
             id: node.id,
             cluster_id: node.cluster_id,
-            node_name: node.node_name.clone(),
+            node_name: node.name.clone(),
             pg_version: node.pg_version.clone(),
             ip_address: node.ip_address,
             role: Role::Unknown,
             errors: vec![e],
             disk_check,
         }) {
-            tracing::trace!(node_name = %node.node_name, "sent analyzed node after connection failure");
+            tracing::trace!(node_name = %node.name, "sent analyzed node after connection failure");
         } else {
-            tracing::error!(node_name = %node.node_name, "failed to send analyzed node");
+            tracing::error!(node_name = %node.name, "failed to send analyzed node");
         }
         return;
     };
@@ -118,11 +118,11 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
     let conn_node = Arc::clone(&node);
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            tracing::error!(node_name = %conn_node.node_name, error = %e, "postgres connection closed with error");
+            tracing::error!(node_name = %conn_node.name, error = %e, "postgres connection closed with error");
             match conn_tx.send(AnalyzedNode {
                 id: conn_node.id,
                 cluster_id: conn_node.cluster_id,
-                node_name: conn_node.node_name.clone(),
+                node_name: conn_node.name.clone(),
                 pg_version: conn_node.pg_version.clone(),
                 ip_address: conn_node.ip_address,
                 role: Role::Unknown,
@@ -130,10 +130,10 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                 disk_check: None,
             }) {
                 Ok(()) => {
-                    tracing::trace!(node_name = %conn_node.node_name, "sent analyzed node after connection error");
+                    tracing::trace!(node_name = %conn_node.name, "sent analyzed node after connection error");
                 }
                 Err(e) => {
-                    tracing::error!(node_name = %conn_node.node_name, error = %e, "failed to send analyzed node");
+                    tracing::error!(node_name = %conn_node.name, error = %e, "failed to send analyzed node");
                 }
             }
         }
@@ -147,7 +147,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
             return match tx.send(AnalyzedNode {
                 id: node.id,
                 cluster_id: node.cluster_id,
-                node_name: node.node_name.clone(),
+                node_name: node.name.clone(),
                 pg_version: node.pg_version.clone(),
                 ip_address: node.ip_address,
                 role: Role::Unknown,
@@ -155,10 +155,10 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                 disk_check,
             }) {
                 Ok(()) => {
-                    tracing::trace!(node_name = %node_r.node_name, "sent node with unknown role");
+                    tracing::trace!(node_name = %node_r.name, "sent node with unknown role");
                 }
                 Err(e) => {
-                    tracing::error!(node_name = %node_r.node_name, error = %e, "failed to send node with unknown role");
+                    tracing::error!(node_name = %node_r.name, error = %e, "failed to send node with unknown role");
                 }
             };
         }
@@ -166,7 +166,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
 
     // Use an intermediate channel so we can patch the disk_check result in before forwarding
     let (hc_tx, mut hc_rx) = tokio::sync::mpsc::unbounded_channel::<AnalyzedNode>();
-    let node_name = node.node_name.clone();
+    let node_name = node.name.clone();
 
     if primary {
         tracing::trace!(node_name = %node_name, role = "primary", "spawning health check task");

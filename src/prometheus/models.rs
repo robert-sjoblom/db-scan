@@ -70,7 +70,7 @@ pub enum Query {
 }
 
 impl Query {
-    /// Creates a prometheus PromQL query with the given host.
+    /// Creates a prometheus `PromQL` query with the given host.
     pub fn with_host(&self, host: &str) -> String {
         match self {
             Query::SizeBytes => {
@@ -109,10 +109,7 @@ mod tests {
     #[test]
     fn test_report_prometheus_missing() {
         let mut metric = HashMap::new();
-        metric.insert(
-            "not_instance_key".to_owned(),
-            "127.3.18.28:9999".to_owned(),
-        );
+        metric.insert("not_instance_key".to_owned(), "127.3.18.28:9999".to_owned());
 
         let value = (2000_f64, "415626584064".to_owned());
         let res = PrometheusResult { metric, value };

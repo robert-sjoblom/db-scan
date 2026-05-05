@@ -30,7 +30,7 @@ pub enum DiskCheckOutcome {
 
 const MAX_SAMPLE_MESSAGES: usize = 10;
 
-#[instrument(skip(ssh_user), level = "debug", fields(node_name = %node.node_name))]
+#[instrument(skip(ssh_user), level = "debug", fields(node_name = %node.name))]
 pub(super) async fn check_disk_health(node: &Arc<Node>, ssh_user: &str) -> DiskCheckOutcome {
     let destination = format!("{}@{}", ssh_user, node.ip_address);
     tracing::debug!(destination = %destination, "connecting via SSH for disk check");
@@ -76,7 +76,7 @@ pub(super) async fn check_disk_health(node: &Arc<Node>, ssh_user: &str) -> DiskC
     let result = parse_dmesg_output(&lines);
 
     tracing::info!(
-        node_name = %node.node_name,
+        node_name = %node.name,
         io_errors = result.io_errors,
         filesystem_errors = result.filesystem_errors,
         block_errors = result.block_errors,

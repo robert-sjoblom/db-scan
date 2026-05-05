@@ -10,18 +10,18 @@ const CERT_CLUSTERS_IN_DEV: [&str; 3] = ["dev-pg-app006", "dev-pg-app010", "dev-
 pub struct Node {
     pub id: u32,
     pub cluster_id: u32,
-    pub node_name: String,
+    pub name: String,
     pub pg_version: String,
     pub ip_address: Ipv4Addr,
 }
 
 impl Node {
     pub fn env(&self) -> String {
-        self.node_name.split('-').next().unwrap().to_owned()
+        self.name.split('-').next().unwrap().to_owned()
     }
 
     pub fn cluster_name(&self) -> String {
-        self.node_name
+        self.name
             .split('-')
             .take(3)
             .collect::<Vec<&str>>()
@@ -47,7 +47,7 @@ mod tests {
             Self {
                 id: 1,
                 cluster_id: 10,
-                node_name: "prod-pg-app007-db001.sto1.example.com".to_owned(),
+                name: "prod-pg-app007-db001.sto1.example.com".to_owned(),
                 pg_version: "15.12".to_owned(),
                 ip_address: "127.1.17.7".parse().unwrap(),
             }
@@ -63,7 +63,7 @@ mod tests {
 
         assert_eq!(actual, expected);
 
-        node.node_name = "dev-pg-app001-db001.sto1.example.com".to_owned();
+        node.name = "dev-pg-app001-db001.sto1.example.com".to_owned();
 
         let actual = node.env();
         let expected = "dev";
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn cluster_name_from_node_name_ts() {
         let node = Node {
-            node_name: "prod-ts-metrics001-db002.sto2.example.com".to_owned(),
+            name: "prod-ts-metrics001-db002.sto2.example.com".to_owned(),
             ..Node::fixture()
         };
 
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn test_node_requires_cert_dev_pg_app006() {
         let node = Node {
-            node_name: "dev-pg-app006-db001.sto1.example.com".to_owned(),
+            name: "dev-pg-app006-db001.sto1.example.com".to_owned(),
             ..Node::fixture()
         };
 
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn test_node_requires_cert_dev_pg_app010() {
         let node = Node {
-            node_name: "dev-pg-app010-db001.sto2.example.com".to_owned(),
+            name: "dev-pg-app010-db001.sto2.example.com".to_owned(),
             ..Node::fixture()
         };
 
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn test_node_requires_cert_dev_pg_app011() {
         let node = Node {
-            node_name: "dev-pg-app011-db001.sto2.example.com".to_owned(),
+            name: "dev-pg-app011-db001.sto2.example.com".to_owned(),
             ..Node::fixture()
         };
 
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn test_node_requires_cert_dev_other() {
         let node = Node {
-            node_name: "dev-pg-app001-db001.sto1.example.com".to_owned(),
+            name: "dev-pg-app001-db001.sto1.example.com".to_owned(),
             ..Node::fixture()
         };
 
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn test_node_requires_cert_other() {
         let node = Node {
-            node_name: "acce-pg-app001-db001.sto1.example.com".to_owned(),
+            name: "acce-pg-app001-db001.sto1.example.com".to_owned(),
             ..Node::fixture()
         };
 

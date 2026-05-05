@@ -13,7 +13,7 @@ static CONNECTOR: OnceLock<MakeTlsConnector> = OnceLock::new();
 type PgConnection = Connection<Socket, postgres_native_tls::TlsStream<Socket>>;
 
 pub async fn connect(node: &Node) -> Result<(Client, PgConnection), DbError> {
-    tracing::trace!(node_name = %node.node_name, node_id = node.id, "connecting to node");
+    tracing::trace!(node_name = %node.name, node_id = node.id, "connecting to node");
     let cfg = pg_cfg(node);
     let connector = if node.requires_cert() {
         connector()
@@ -30,11 +30,11 @@ pub async fn connect(node: &Node) -> Result<(Client, PgConnection), DbError> {
 }
 
 fn pg_cfg(node: &Node) -> Config {
-    tracing::trace!(node_name = %node.node_name, "building pg config");
+    tracing::trace!(node_name = %node.name, "building pg config");
     let args = CONFIG.get().expect("Args initialized");
     let mut cfg = Config::new();
 
-    cfg.host(&node.node_name)
+    cfg.host(&node.name)
         .port(5432)
         .dbname("postgres")
         .connect_timeout(Duration::from_secs(10));

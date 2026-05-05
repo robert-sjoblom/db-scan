@@ -242,7 +242,7 @@ async fn filter_nodes(
         .inspect(|n| {
             tracing::trace!(
                 node_id = n.id,
-                node_name = %n.node_name,
+                node_name = %n.name,
                 cluster_id = n.cluster_id,
                 "fetched node"
             );
