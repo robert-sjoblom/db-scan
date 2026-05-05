@@ -478,6 +478,11 @@ fn format_reason(reason: &Reason) -> (String, String) {
             .to_string();
             (short, details)
         }
+        Reason::NotInQuorum { replicas } => {
+            let short = format!("NotInQuorum: {}", replicas.join(", "));
+            let details = serde_json::json!({ "replicas": replicas }).to_string();
+            (short, details)
+        }
         Reason::NoPrimary => ("NoPrimary".to_string(), "{}".to_string()),
         Reason::SplitBrain(info) => {
             let resolution_str = match &info.resolution {
