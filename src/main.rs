@@ -45,6 +45,13 @@ async fn main() {
     }
 
     tracing::trace!(args = ?args, "parsed command line arguments");
+
+    if args.check_disks && args.ssh_user.is_none() {
+        tracing::warn!(
+            "--check-disks enabled but ssh_user is not set (CLI --ssh-user, SSH_USER env, or ssh.user in config); disk checks will be skipped"
+        );
+    }
+
     v2::db::setup(&args);
 
     // Extract options before moving args
