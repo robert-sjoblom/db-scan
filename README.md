@@ -128,6 +128,34 @@ db-scan --check-disks --ssh-user first_last
 
 ## Configuration
 
+### Config File
+
+By default, `db-scan` loads `~/.config/db-scan/config.yml` (respects `$XDG_CONFIG_HOME`). Use `--config <PATH>` to specify a different file, or `--no-config` to skip loading one entirely.
+
+```yaml
+postgres:
+  user: myuser
+  sslkey: /path/to/ssl.key
+  sslcert: /path/to/ssl.crt
+  sslrootcert: /path/to/ca.crt
+
+defaults:
+  user: postgres
+  password: secret
+
+ssh:
+  user: first_last
+
+display:
+  log_level: info
+  no_color: false
+
+disk_check:
+  window_minutes: 60
+```
+
+All fields are optional. CLI flags and environment variables take precedence over the config file. `PGPASSWORD` is never read from the config file.
+
 ### Environment Variables
 
 ```bash
