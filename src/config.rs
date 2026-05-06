@@ -128,9 +128,10 @@ pub(crate) struct CliArgs {
 
 impl DbScanConfig {
     pub(crate) fn cluster_pattern(&self) -> String {
-        self.cluster
-            .as_ref()
-            .map_or_else(|| ".*-(pg|ts)-.*".to_owned(), |r| r.as_str().to_owned())
+        self.cluster.as_ref().map_or_else(
+            || ".*-(pg|ts)-.*".to_owned(),
+            |r| format!(".*{}.*", r.as_str()),
+        )
     }
 }
 
