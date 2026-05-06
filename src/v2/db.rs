@@ -45,8 +45,8 @@ fn pg_cfg(node: &Node) -> Config {
             .password(args.pgpassword.expose_secret());
     } else {
         cfg.ssl_mode(SslMode::Prefer)
-            .user("postgres")
-            .password("fortnox1");
+            .user(&args.default_user)
+            .password(&args.default_pass);
     }
 
     cfg
