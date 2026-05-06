@@ -4,7 +4,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::Parser as _;
 use error_stack::Report;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::instrument;
@@ -33,7 +32,13 @@ mod v2;
 
 #[tokio::main]
 async fn main() {
-    let args = config::DbScanConfig::parse();
+    let args = match config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("config error: {e:#}");
+            std::process::exit(2);
+        }
+    };
 
     if !args.silence_tracing {
         logging::setup(args.log_level.clone());
