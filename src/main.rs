@@ -227,7 +227,7 @@ async fn filter_nodes(
             let passes_cli_filter = match &get_config().cluster {
                 Some(re) => {
                     let matches = re.is_match(&n.cluster_name());
-                    tracing::debug!(
+                    tracing::trace!(
                         cluster_name = %n.cluster_name(),
                         pattern = re.as_str(),
                         matches,
