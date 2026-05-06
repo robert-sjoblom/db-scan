@@ -13,8 +13,21 @@ const DATABASE_PORTAL_URL: &str = match option_env!("DATABASE_PORTAL_URL") {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct NodesResponse {
-    pub items: Vec<Node>,
+    pub items: Vec<serde_json::Value>,
     pub count: i32,
+}
+
+fn parse_nodes(items: Vec<serde_json::Value>) -> Vec<Node> {
+    items
+        .into_iter()
+        .filter_map(|v| match serde_json::from_value::<Node>(v.clone()) {
+            Ok(node) => Some(node),
+            Err(e) => {
+                tracing::warn!(error = %e, raw = %v, "skipping node that failed to deserialize");
+                None
+            }
+        })
+        .collect()
 }
 
 #[instrument(skip_all, level = "INFO")]
@@ -34,7 +47,7 @@ pub(crate) async fn nodes() -> Result<Vec<Node>, DbPortalErrors> {
             source = "file",
             "loaded nodes from cache"
         );
-        return Ok(nodes_response.items);
+        return Ok(parse_nodes(nodes_response.items));
     }
 
     tracing::info!(
@@ -57,15 +70,15 @@ pub(crate) async fn nodes() -> Result<Vec<Node>, DbPortalErrors> {
         source = "api",
         "fetched nodes from API"
     );
-    Ok(nodes_response.items)
+    Ok(parse_nodes(nodes_response.items))
 }
 
 #[derive(Error, Debug)]
 pub enum DbPortalErrors {
-    #[error("HTTP request failed")]
+    #[error("HTTP request failed: {0}")]
     Reqwest(#[from] reqwest::Error),
-    #[error("JSON serialization/deserialization failed")]
+    #[error("JSON serialization/deserialization failed: {0}")]
     Serde(#[from] serde_json::Error),
-    #[error("IO operation failed")]
+    #[error("IO operation failed: {0}")]
     Io(#[from] std::io::Error),
 }

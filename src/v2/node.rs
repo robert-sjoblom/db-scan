@@ -10,6 +10,7 @@ const CERT_CLUSTERS_IN_DEV: [&str; 3] = ["dev-pg-app006", "dev-pg-app010", "dev-
 pub struct Node {
     pub id: u32,
     pub cluster_id: u32,
+    #[serde(rename = "node_name")]
     pub name: String,
     pub pg_version: String,
     pub ip_address: Ipv4Addr,
