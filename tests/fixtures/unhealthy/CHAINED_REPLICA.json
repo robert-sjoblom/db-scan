@@ -21,7 +21,8 @@
                             "wal_level": "logical",
                             "max_replication_slots": "180",
                             "max_wal_senders": "184",
-                            "synchronous_commit": "remote_apply"
+                            "synchronous_commit": "remote_apply",
+                            "archive_mode": "on"
                         },
                         "replication": [
                             {

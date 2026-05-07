@@ -64,6 +64,11 @@ pub struct Cluster {
 }
 
 impl Cluster {
+    /// Returns an iterator over all nodes in the cluster.
+    pub fn nodes(&self) -> &[AnalyzedNode] {
+        self.nodes.as_slice()
+    }
+
     /// Returns an iterator over all primary nodes in the cluster.
     pub fn primaries(&self) -> impl Iterator<Item = &AnalyzedNode> {
         self.nodes.iter().filter(|n| n.role.is_primary())
