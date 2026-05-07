@@ -76,3 +76,38 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
         format!("{}B", bytes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_lag_to_bytes_zero_lag() {
+        assert_eq!(parse_lag_to_bytes("00:00:00.001234"), Some(0));
+    }
+
+    #[test]
+    fn parse_lag_to_bytes_one_second() {
+        // 1 second * 16MB/s = 16,000,000 bytes
+        assert_eq!(parse_lag_to_bytes("00:00:01.000000"), Some(16_000_000));
+    }
+
+    #[test]
+    fn parse_lag_to_bytes_one_minute() {
+        // 60 seconds * 16MB/s = 960,000,000 bytes
+        assert_eq!(parse_lag_to_bytes("00:01:00.000000"), Some(960_000_000));
+    }
+
+    #[test]
+    fn parse_lag_to_bytes_complex() {
+        // 1h 30m 45s = 5445 seconds * 16MB/s = 87,120,000,000 bytes
+        assert_eq!(parse_lag_to_bytes("01:30:45.123456"), Some(87_120_000_000));
+    }
+
+    #[test]
+    fn parse_lag_to_bytes_invalid_format() {
+        assert_eq!(parse_lag_to_bytes("invalid"), None);
+        assert_eq!(parse_lag_to_bytes("00:00"), None);
+        assert_eq!(parse_lag_to_bytes(""), None);
+    }
+}

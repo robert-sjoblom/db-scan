@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::v2::{
-    analyze::{AnalyzedCluster, ClusterHealth, Reason, SplitBrainInfo, SplitBrainResolution},
+    analyze::{
+        AnalyzedCluster, ClusterHealth, ClusterVerdict, NodeVerdict, Reason, SplitBrainInfo,
+        SplitBrainResolution, Verdict,
+    },
     scan::{
         AnalyzedNode, disk_check::DiskCheckOutcome, health_check_primary::ReplicationConnection,
     },
@@ -12,7 +15,6 @@ use super::{
     view::{ClusterView, NodeView, PrimaryView, ReasonView, ReplicaView, ReplicasView, Status},
 };
 
-#[expect(clippy::too_many_lines, reason = "102 is 2 more than 100, it's fine")]
 pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
     match health {
         ClusterHealth::Healthy { failover, cluster } => {
@@ -55,12 +57,9 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
                 &cluster.cluster.nodes,
                 show_tl,
             );
-            let reason_view = build_reason_view(reason);
+            let reason_view = build_reason_view(reason, &cluster.verdict);
             let disk = extract_disk_info(cluster);
-            let failover = cluster
-                .cluster
-                .primary()
-                .is_some_and(|n| !n.node_name.contains("-db001"));
+            let failover = cluster.verdict.has_failover();
             log_degraded(cluster.name(), &reason_view.short, *lag);
             ClusterView {
                 status: Status::Degraded,
@@ -75,9 +74,9 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
         }
         ClusterHealth::Critical { cluster, reason } => {
             let (primary, replicas) = build_primary_replicas_for_critical(cluster, reason);
-            let reason_view = build_reason_view(reason);
+            let reason_view = build_reason_view(reason, &cluster.verdict);
             let disk = extract_disk_info(cluster);
-            log_critical(cluster.name(), reason, &reason_view.short);
+            log_critical(cluster, reason, &reason_view.short);
             ClusterView {
                 status: Status::Critical,
                 name: cluster.name().to_owned(),
@@ -94,7 +93,7 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
             reachable_nodes,
             reason,
         } => {
-            let reason_view = build_reason_view(reason);
+            let reason_view = build_reason_view(reason, &cluster.verdict);
             let disk = extract_disk_info(cluster);
             tracing::warn!(
                 cluster = %cluster.name(),
@@ -185,7 +184,10 @@ fn build_primary_replicas_for_critical(
 ) -> (PrimaryView, ReplicasView) {
     match reason {
         Reason::NoPrimary => (PrimaryView::None, ReplicasView::None),
-        Reason::SplitBrain(info) => {
+        Reason::SplitBrain => {
+            let Some(ClusterVerdict::SplitBrain(info)) = cluster.verdict.cluster_verdict() else {
+                unreachable!("Reason::SplitBrain implies ClusterVerdict::SplitBrain");
+            };
             let show_tl = timelines_differ(&cluster.cluster.nodes);
             let true_tl = if show_tl {
                 find_node_timeline(&info.true_primary, &cluster.cluster.nodes)
@@ -222,16 +224,18 @@ fn build_primary_replicas_for_critical(
             let primary = build_primary_view(cluster, show_tl);
             (primary, ReplicasView::None)
         }
-        Reason::OneReplicaDown
+        Reason::ReducedRedundancy
         | Reason::HighReplicationLag
         | Reason::RebuildingReplica
-        | Reason::ChainedReplica { .. }
-        | Reason::NotInQuorum { .. }
-        | Reason::ArchiveFailure { .. }
+        | Reason::ChainedReplica
+        | Reason::NotInQuorum
+        | Reason::ArchiveFailure
+        | Reason::ArchivingDisabled
+        | Reason::SyncCommitOff
         | Reason::NoNodesReachable
         | Reason::UnexpectedTopology
-        | Reason::DiskIoErrors { .. }
-        | Reason::FilesystemErrors { .. } => {
+        | Reason::DiskIoErrors
+        | Reason::FilesystemErrors => {
             let show_tl = timelines_differ(&cluster.cluster.nodes);
             let primary = build_primary_view(cluster, show_tl);
             let replicas = build_replicas_view(
@@ -286,8 +290,8 @@ fn build_split_brain_replicas(info: &SplitBrainInfo) -> ReplicasView {
     }
 }
 
-fn build_reason_view(reason: &Reason) -> ReasonView {
-    let (short, details_json) = format_reason(reason);
+fn build_reason_view(reason: &Reason, verdict: &Verdict) -> ReasonView {
+    let (short, details_json) = format_reason(reason, verdict);
     ReasonView {
         short,
         details_json,
@@ -303,11 +307,15 @@ fn log_degraded(cluster: &str, reason: &str, lag: u64) {
     );
 }
 
-fn log_critical(cluster: &str, reason: &Reason, reason_str: &str) {
+fn log_critical(cluster: &AnalyzedCluster, reason: &Reason, reason_str: &str) {
+    let name = cluster.name();
     match reason {
-        Reason::SplitBrain(info) => {
+        Reason::SplitBrain => {
+            let Some(ClusterVerdict::SplitBrain(info)) = cluster.verdict.cluster_verdict() else {
+                unreachable!("Reason::SplitBrain implies ClusterVerdict::SplitBrain");
+            };
             tracing::error!(
-                cluster = %cluster,
+                cluster = %name,
                 reason = %reason_str,
                 true_primary = %info.true_primary,
                 stale_primaries = ?info.stale_primaries,
@@ -317,37 +325,39 @@ fn log_critical(cluster: &str, reason: &Reason, reason_str: &str) {
         }
         Reason::WritesBlocked => {
             tracing::error!(
-                cluster = %cluster,
+                cluster = %name,
                 reason = %reason_str,
                 "writes blocked - no sync replicas available"
             );
         }
         Reason::WritesUnprotected => {
             tracing::error!(
-                cluster = %cluster,
+                cluster = %name,
                 reason = %reason_str,
                 "writes unprotected - no replication redundancy"
             );
         }
         Reason::NoPrimary => {
             tracing::error!(
-                cluster = %cluster,
+                cluster = %name,
                 reason = %reason_str,
                 "no primary found in cluster"
             );
         }
-        Reason::OneReplicaDown
+        Reason::ReducedRedundancy
         | Reason::HighReplicationLag
         | Reason::RebuildingReplica
-        | Reason::ChainedReplica { .. }
-        | Reason::NotInQuorum { .. }
-        | Reason::ArchiveFailure { .. }
+        | Reason::ChainedReplica
+        | Reason::NotInQuorum
+        | Reason::ArchiveFailure
+        | Reason::ArchivingDisabled
+        | Reason::SyncCommitOff
         | Reason::NoNodesReachable
         | Reason::UnexpectedTopology
-        | Reason::DiskIoErrors { .. }
-        | Reason::FilesystemErrors { .. } => {
+        | Reason::DiskIoErrors
+        | Reason::FilesystemErrors => {
             tracing::error!(
-                cluster = %cluster,
+                cluster = %name,
                 reason = %reason_str,
                 "cluster critical"
             );
@@ -483,15 +493,27 @@ fn extract_disk_info(cluster: &AnalyzedCluster) -> String {
     parts.join(",")
 }
 
-fn format_reason(reason: &Reason) -> (String, String) {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one match arm per Reason variant; splitting would just trade size for indirection"
+)]
+fn format_reason(reason: &Reason, verdict: &Verdict) -> (String, String) {
     match reason {
-        Reason::OneReplicaDown => ("OneReplicaDown".to_owned(), "{}".to_owned()),
+        Reason::ReducedRedundancy => ("ReducedRedundancy".to_owned(), "{}".to_owned()),
         Reason::HighReplicationLag => ("HighReplicationLag".to_owned(), "{}".to_owned()),
         Reason::RebuildingReplica => ("RebuildingReplica".to_owned(), "{}".to_owned()),
-        Reason::ChainedReplica {
-            chained_replica,
-            upstream_replica,
-        } => {
+        Reason::ChainedReplica => {
+            // Find the first ChainedReplication entry; data lives in the verdict.
+            let chained = verdict.node_verdicts().iter().find_map(|(name, v)| {
+                if let NodeVerdict::ChainedReplication { upstream } = v {
+                    Some((name.as_str(), upstream.as_str()))
+                } else {
+                    None
+                }
+            });
+            let Some((chained_replica, upstream_replica)) = chained else {
+                return ("ChainedReplica".to_owned(), "{}".to_owned());
+            };
             let short = format!(
                 "ChainedReplica: {}→{}",
                 extract_db_number(chained_replica),
@@ -504,13 +526,23 @@ fn format_reason(reason: &Reason) -> (String, String) {
             .to_string();
             (short, details)
         }
-        Reason::NotInQuorum { replicas } => {
+        Reason::NotInQuorum => {
+            let replicas: Vec<&str> = verdict
+                .node_verdicts()
+                .iter()
+                .filter_map(|(name, v)| {
+                    matches!(v, NodeVerdict::NotInQuorum).then_some(name.as_str())
+                })
+                .collect();
             let short = format!("NotInQuorum: {}", replicas.join(", "));
             let details = serde_json::json!({ "replicas": replicas }).to_string();
             (short, details)
         }
         Reason::NoPrimary => ("NoPrimary".to_owned(), "{}".to_owned()),
-        Reason::SplitBrain(info) => {
+        Reason::SplitBrain => {
+            let Some(ClusterVerdict::SplitBrain(info)) = verdict.cluster_verdict() else {
+                return ("SplitBrain".to_owned(), "{}".to_owned());
+            };
             let resolution_str = match &info.resolution {
                 SplitBrainResolution::HigherTimeline {
                     true_primary_timeline,
@@ -546,10 +578,21 @@ fn format_reason(reason: &Reason) -> (String, String) {
         }
         Reason::WritesBlocked => ("WritesBlocked".to_owned(), "{}".to_owned()),
         Reason::WritesUnprotected => ("WritesUnprotected".to_owned(), "{}".to_owned()),
-        Reason::ArchiveFailure {
-            failed_count,
-            last_failed_wal,
-        } => {
+        Reason::ArchiveFailure => {
+            let archive = verdict.node_verdicts().iter().find_map(|(_, v)| {
+                if let NodeVerdict::ArchiveFailure {
+                    failed_count,
+                    last_wal,
+                } = v
+                {
+                    Some((*failed_count, last_wal.as_deref()))
+                } else {
+                    None
+                }
+            });
+            let Some((failed_count, last_failed_wal)) = archive else {
+                return ("ArchiveFailure".to_owned(), "{}".to_owned());
+            };
             let short = format!("ArchiveFailure: {} failures", failed_count);
             let details = serde_json::json!({
                 "failed_count": failed_count,
@@ -558,13 +601,21 @@ fn format_reason(reason: &Reason) -> (String, String) {
             .to_string();
             (short, details)
         }
+        Reason::ArchivingDisabled => ("ArchivingDisabled".to_owned(), "{}".to_owned()),
+        Reason::SyncCommitOff => ("SyncCommitOff".to_owned(), "{}".to_owned()),
         Reason::NoNodesReachable => ("NoNodesReachable".to_owned(), "{}".to_owned()),
         Reason::UnexpectedTopology => ("UnexpectedTopology".to_owned(), "{}".to_owned()),
-        Reason::DiskIoErrors {
-            node,
-            io_errors,
-            block_errors,
-        } => {
+        Reason::DiskIoErrors => {
+            let entry = verdict.node_verdicts().iter().find_map(|(name, v)| {
+                if let NodeVerdict::DiskIoErrors { io, block } = v {
+                    Some((name.as_str(), *io, *block))
+                } else {
+                    None
+                }
+            });
+            let Some((node, io_errors, block_errors)) = entry else {
+                return ("DiskIoErrors".to_owned(), "{}".to_owned());
+            };
             let short = format!(
                 "disk I/O errors on {} (io={}, blk={})",
                 extract_db_number(node),
@@ -573,7 +624,17 @@ fn format_reason(reason: &Reason) -> (String, String) {
             );
             (short, "{}".to_owned())
         }
-        Reason::FilesystemErrors { node, count } => {
+        Reason::FilesystemErrors => {
+            let entry = verdict.node_verdicts().iter().find_map(|(name, v)| {
+                if let NodeVerdict::FilesystemErrors { count } = v {
+                    Some((name.as_str(), *count))
+                } else {
+                    None
+                }
+            });
+            let Some((node, count)) = entry else {
+                return ("FilesystemErrors".to_owned(), "{}".to_owned());
+            };
             let short = format!(
                 "filesystem errors on {} ({})",
                 extract_db_number(node),

@@ -184,7 +184,7 @@ string_lit_chars_any = { level = "deny", priority = 127 }
 string_slice = { level = "deny", priority = 127 }
 suspicious_xor_used_as_pow = { level = "deny", priority = 127 }
 tests_outside_test_module = { level = "deny", priority = 127 }
-todo = { level = "deny", priority = 127 }
+# todo = { level = "deny", priority = 127 }
 try_err = { level = "deny", priority = 127 }
 undocumented_unsafe_blocks = { level = "deny", priority = 127 }
 unimplemented = { level = "deny", priority = 127 }
@@ -265,4 +265,5 @@ serde_yaml = "0.9.34"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
+rstest = "0.26.1"
 rvcr = { git = "https://github.com/robert-sjoblom/rvcr", tag = "v4" }

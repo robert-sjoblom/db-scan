@@ -39,11 +39,15 @@ Problems:
 ```rust
 enum NodeVerdict {
     ArchiveFailure { failed_count: i64, last_wal: Option<String> },
+    ArchivingDisabled,
     SyncCommitOff,
     IsFailoverNode,
     HighLag { bytes: u64 },
     DiskIoErrors { io: u32, block: u32 },
     FilesystemErrors { count: u32 },
+    ChainedFrom { upstream: String },
+    NotStreaming,
+    NotInQuorum,
 }
 
 enum ClusterVerdict {
@@ -51,7 +55,8 @@ enum ClusterVerdict {
     WritesBlocked,
     WritesUnprotected,
     NoPrimary,
-    ChainedReplication { replica: String, upstream: String },
+    NoNodesReachable,
+    UnexpectedTopology { replica_count: usize },
 }
 
 struct Verdict {
@@ -63,9 +68,21 @@ struct Verdict {
 **Location:** `Verdict` lives on `AnalyzedCluster` so it flows through the pipeline and is accessible to writer.
 
 **Flow:**
-1. `analyze()` runs checks → collects `Verdict`
-2. `Verdict::to_health()` maps verdicts to `ClusterHealth` with appropriate `Reason`
+1. `analyze()` runs checks → returns `AnalyzedCluster` with `Verdict` populated
+2. `classify(analyzed) -> ClusterHealth` maps the verdict to `ClusterHealth` with appropriate `Reason`
 3. Writer accesses `cluster.verdict` for display details instead of re-implementing domain logic
+
+Note: classification is a free function (or method on `AnalyzedCluster`), not a method on `Verdict` — `ClusterHealth` wraps `AnalyzedCluster`, so the mapper needs the whole analyzed cluster, not the verdict in isolation.
+
+**Totality:** Every `ClusterHealth` variant has a corresponding `ClusterVerdict` (or `NodeVerdict` set). This is why `ClusterVerdict` includes `NoNodesReachable` and `UnexpectedTopology` — they cover the `ClusterHealth::Unknown` cases. Without them, the writer would need a fallback path for clusters with no verdict, defeating the "pure view transformation" goal.
+
+**`ChainedReplication` moved to `NodeVerdict::ChainedFrom`:** Originally a `ClusterVerdict`, but it's fundamentally a per-replica fact ("replica X follows upstream Y"). The `(node_name, NodeVerdict)` tuple already encodes "node X has property Y" — the cluster-level form was redundant with that shape. Moving it also keeps `cluster_verdict` mutually exclusive across its remaining variants, justifying the `Option<ClusterVerdict>` choice (a chained replica can co-occur with `WritesUnprotected`, which would have forced `Vec<ClusterVerdict>` otherwise).
+
+**`NotStreaming` and `NotInQuorum` added:** These cover today's `Reason::RebuildingReplica` and `Reason::NotInQuorum`. Both are per-replica facts (a specific replica isn't streaming / isn't in quorum), so they fit `NodeVerdict` cleanly. Without them, the verdict set wouldn't be complete enough for `classify()` to reproduce existing `ClusterHealth` outputs.
+
+**`SyncCommitOff` and `WritesUnprotected` are distinct, not redundant:** `SyncCommitOff` (NodeVerdict) fires whenever the primary has `synchronous_commit=off` or empty `synchronous_standby_names` — a misconfiguration finding regardless of replica state. `WritesUnprotected` (ClusterVerdict) is the stronger case: sync is off *and* there are no streaming replicas at all. Both can co-occur. The motivating incident: a cluster with sync off but healthy-looking streaming replicas — streaming replicas don't protect against data loss when the primary doesn't wait for their acks, so the misconfiguration must be flagged on its own.
+
+**`ArchivingDisabled` rationale:** `archive_mode` is mandatory across the fleet (PITR/backup depends on it). The previous code silently skipped the archive check when `archive_mode != "on"`, masking misconfigured primaries. `ArchivingDisabled` fires when the setting is missing or not in `{on, always}` (`always` is valid for archive-from-standby). Severity: Critical — same as `ArchiveFailure` — because a primary not archiving is a backup outage regardless of whether it's "off on purpose" or "failing."
 
 ### 3. Defer Topology Analyzer Extraction
 

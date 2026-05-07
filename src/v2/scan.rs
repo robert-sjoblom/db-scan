@@ -1,7 +1,10 @@
 use std::{net::Ipv4Addr, sync::Arc};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::{
+    Semaphore,
+    mpsc::{UnboundedReceiver, UnboundedSender},
+};
 use tokio_postgres::Client;
 use tracing::instrument;
 
@@ -25,10 +28,18 @@ pub async fn scan_nodes(
     mut rx: UnboundedReceiver<Node>,
     tx: UnboundedSender<AnalyzedNode>,
 ) {
+    let semaphore = Arc::new(Semaphore::new(get_config().max_concurrency));
     let mut handles = Vec::new();
     while let Some(node) = rx.recv().await {
         let tx = tx.clone();
-        handles.push(tokio::spawn(async move { scan(node, tx).await }));
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .expect("scan semaphore closed");
+        handles.push(tokio::spawn(async move {
+            let _permit = permit;
+            scan(node, tx).await;
+        }));
     }
     futures::future::join_all(handles).await;
 }

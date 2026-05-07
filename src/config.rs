@@ -35,6 +35,7 @@ pub(crate) struct DbScanConfig {
     pub(crate) ssh_user: Option<String>,
     pub(crate) check_disks: bool,
     pub(crate) disk_check_window_minutes: u64,
+    pub(crate) max_concurrency: usize,
 }
 
 /// A tool to scan `PostgreSQL` clusters for configuration and health.
@@ -124,6 +125,11 @@ pub(crate) struct CliArgs {
     /// Older entries are ignored.
     #[arg(long, env = "DISK_CHECK_WINDOW_MINUTES")]
     pub(crate) disk_check_window_minutes: Option<u64>,
+
+    /// Maximum number of nodes scanned concurrently. Higher values finish faster
+    /// but can saturate shared SSH/Postgres targets and cause spurious failures.
+    #[arg(long, env = "DB_SCAN_MAX_CONCURRENCY")]
+    pub(crate) max_concurrency: Option<usize>,
 }
 
 impl DbScanConfig {
@@ -148,6 +154,8 @@ struct FileConfig {
     display: DisplayFile,
     #[serde(default)]
     disk_check: DiskCheckFile,
+    #[serde(default)]
+    scan: ScanFile,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -183,6 +191,12 @@ struct DisplayFile {
 #[serde(deny_unknown_fields)]
 struct DiskCheckFile {
     window_minutes: Option<u64>,
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
+struct ScanFile {
+    max_concurrency: Option<usize>,
 }
 
 fn parse_cluster_regex(s: &str) -> Result<Regex, regex_lite::Error> {
@@ -255,6 +269,11 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         .disk_check_window_minutes
         .or(file.disk_check.window_minutes)
         .unwrap_or(60);
+    let max_concurrency = cli
+        .max_concurrency
+        .or(file.scan.max_concurrency)
+        .unwrap_or(256)
+        .max(1);
 
     Ok(DbScanConfig {
         pguser,
@@ -275,5 +294,6 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         ssh_user,
         check_disks: cli.check_disks,
         disk_check_window_minutes,
+        max_concurrency,
     })
 }

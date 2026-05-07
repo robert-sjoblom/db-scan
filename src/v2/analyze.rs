@@ -7,9 +7,16 @@ use crate::{
     pipeline::PipelineContext,
     prometheus::FileSystemMetrics,
     v2::{
-        analyze::split_brain::resolve_split_brain,
+        analyze::{
+            checks::{
+                check_archive, check_chained_replication, check_disk_errors, check_failover,
+                check_lag, check_quorum, check_streaming, check_sync_commit, check_unreachable,
+                check_writes_blocked, check_writes_unprotected,
+            },
+            split_brain::resolve_split_brain,
+        },
         cluster::Cluster,
-        scan::{AnalyzedNode, Role, health_check_primary::PgSyncSettings},
+        scan::{AnalyzedNode, Role},
     },
 };
 
@@ -21,11 +28,229 @@ const LAG_THRESHOLD_SECONDS: u64 = 5;
 const LAG_THRESHOLD_BYTES: u64 = WAL_GENERATION_RATE_BYTES_PER_SEC * LAG_THRESHOLD_SECONDS;
 
 type Ip = String;
+type NodeName = String;
 
 pub type SplitBrainInfo = crate::v2::analyze::split_brain::SplitBrainInfo;
 pub type SplitBrainResolution = crate::v2::analyze::split_brain::SplitBrainResolution;
 
+mod checks;
+mod classify;
 mod split_brain;
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct AnalyzedCluster {
+    pub cluster: Cluster,
+    /// Backup progress for `pg_basebackup` connections, mapped by `client_addr`
+    /// Key: client IP address, Value: progress (pct * 100, e.g., 4156 = 41.56%).
+    pub backup_progress: HashMap<String, u16>,
+    pub verdict: Verdict,
+}
+
+impl AnalyzedCluster {
+    /// Get the cluster name.
+    pub fn name(&self) -> &str {
+        &self.cluster.name
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+/// Represents the overall health of the `PostgreSQL` cluster.
+pub enum ClusterHealth {
+    /// ✅ The cluster is fully operational and redundant.
+    ///
+    /// - One primary and two replicas are online.
+    /// - Replication lag is within the acceptable threshold (< 5s).
+    /// - Quorum is satisfied.
+    Healthy {
+        failover: bool,
+        cluster: AnalyzedCluster,
+    },
+
+    /// ⚠️ The cluster is operational but has lost some redundancy or performance.
+    ///    Customer impact is low, but the risk of a full outage is elevated.
+    ///
+    /// - **Reduced Redundancy:** One of the two replicas is offline or unhealthy.
+    /// - **High Lag:** The primary is up, and replicas are connected, but replication
+    ///   lag exceeds the 5s threshold.
+    Degraded {
+        lag: u64,
+        cluster: AnalyzedCluster,
+        reason: Reason,
+    },
+    /// 🚨 The cluster is in a non-operational or dangerous state requiring immediate
+    ///    human intervention. Data is at risk, writes are failing, or the cluster is
+    ///    operating without any redundancy.
+    ///
+    /// - **Split Brain:** The monitor detects more than one active primary.
+    ///   While we do have quorum synchronous commit enabled, this is still a
+    ///   dangerous state that requires immediate attention.
+    /// - **`WritesBlocked`:** Primary has `sync_commit=on` but no sync replicas to satisfy quorum.
+    /// - **`WritesUnprotected`:** Primary has `sync_commit=off` with no replicas (DR mode).
+    /// - **`NoPrimary`:** No primary found in the cluster.
+    Critical {
+        cluster: AnalyzedCluster,
+        reason: Reason,
+    },
+
+    /// ❓ The state of the cluster cannot be determined.
+    ///
+    /// - The monitoring tool cannot connect to any nodes.
+    /// - Unexpected cluster topology.
+    Unknown {
+        cluster: AnalyzedCluster,
+        reachable_nodes: usize,
+        reason: Reason,
+    },
+}
+
+impl ClusterHealth {
+    /// Returns a reference to the analyzed cluster. Test-only accessor;
+    /// production code matches each variant directly to extract the cluster.
+    #[cfg(test)]
+    pub fn cluster(&self) -> &AnalyzedCluster {
+        match self {
+            ClusterHealth::Healthy { cluster, .. }
+            | ClusterHealth::Degraded { cluster, .. }
+            | ClusterHealth::Critical { cluster, .. }
+            | ClusterHealth::Unknown { cluster, .. } => cluster,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Reason {
+    // Degraded reasons (declaration order = severity rank within the tier;
+    // last variant in the tier wins via `max()` when multiple Degraded
+    // verdicts coexist).
+    /// I/O or block-device errors found in dmesg.
+    DiskIoErrors,
+    /// One or more streaming replicas have a `sync_state` other than `quorum`.
+    NotInQuorum,
+    /// A replica is replicating from another replica instead of the primary (cascading replication).
+    ChainedReplica,
+    /// A replica has `wal_receiver` = None, indicating it's rebuilding or disconnected.
+    RebuildingReplica,
+    HighReplicationLag,
+    /// One or more nodes are unreachable; pg-level reduced-redundancy state
+    /// outranks lower Degraded findings so it surfaces as the headline reason.
+    ReducedRedundancy,
+
+    // Critical reasons (last variant in the tier wins).
+    /// Quorum sync is not activated.
+    SyncCommitOff,
+    /// No primary found in the cluster.
+    NoPrimary,
+    /// Multiple nodes return `pg_is_in_recovery()` = false.
+    SplitBrain,
+    /// Primary has `sync_commit=on` but no sync replicas - writes are blocked.
+    WritesBlocked,
+    /// Primary has `sync_commit=off` with no replicas - DR mode, no redundancy.
+    WritesUnprotected,
+    /// Archive command has never succeeded since becoming primary.
+    ArchiveFailure,
+    /// Archiving is not enabled.
+    ArchivingDisabled,
+    /// Filesystem-level errors found in dmesg.
+    FilesystemErrors,
+
+    // Unknown reasons
+    /// Cannot connect to any nodes in the cluster.
+    NoNodesReachable,
+    /// Cluster has unexpected topology (e.g., more than 3 nodes).
+    UnexpectedTopology,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Tier {
+    Degraded,
+    Critical,
+    Unknown,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct Verdict {
+    node_verdicts: Vec<(NodeName, NodeVerdict)>,
+    cluster_verdict: Option<ClusterVerdict>,
+}
+
+impl Verdict {
+    fn push_node_verdict(&mut self, node_name: NodeName, verdict: NodeVerdict) {
+        self.node_verdicts.push((node_name, verdict));
+    }
+
+    pub(super) fn max_lag(&self) -> u64 {
+        self.node_verdicts
+            .iter()
+            .filter_map(|(_, v)| {
+                let NodeVerdict::HighLag { bytes } = v else {
+                    return None;
+                };
+
+                Some(*bytes)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn has_failover(&self) -> bool {
+        self.node_verdicts
+            .iter()
+            .any(|(_, v)| matches!(v, NodeVerdict::IsFailoverNode))
+    }
+
+    pub(super) fn node_reasons(&self) -> impl Iterator<Item = Reason> {
+        self.node_verdicts
+            .iter()
+            .filter_map(|(_, v)| Option::<Reason>::from(v))
+    }
+
+    pub fn node_verdicts(&self) -> &[(String, NodeVerdict)] {
+        &self.node_verdicts
+    }
+
+    pub fn cluster_verdict(&self) -> Option<&ClusterVerdict> {
+        self.cluster_verdict.as_ref()
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum NodeVerdict {
+    ArchiveFailure {
+        failed_count: i64,
+        last_wal: Option<String>,
+    },
+    ArchivingDisabled,
+    IsFailoverNode,
+    HighLag {
+        bytes: u64,
+    },
+    DiskIoErrors {
+        io: u32,
+        block: u32,
+    },
+    FilesystemErrors {
+        count: u32,
+    },
+    ChainedReplication {
+        upstream: String,
+    },
+    NotStreaming,
+    NotInQuorum,
+    SyncCommitOff,
+    /// Node is reachable in inventory but unreachable for health checks
+    /// `(Role::Unknown)`. One or more of these → cluster has reduced redundancy.
+    Unreachable,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ClusterVerdict {
+    SplitBrain(SplitBrainInfo),
+    WritesBlocked,
+    WritesUnprotected,
+    NoPrimary,
+    NoNodesReachable,
+    UnexpectedTopology { replica_count: usize },
+}
 
 /// Async task that analyzes clusters and sends results through a channel.
 ///
@@ -66,8 +291,8 @@ fn analyze_with_enrichment(
     batch_data: &HashMap<Ip, FileSystemMetrics>,
 ) -> ClusterHealth {
     let progress = calculate_backup_progress(&cluster, batch_data);
-    let health = analyze(cluster, progress);
-    apply_disk_verdict(health)
+    let analyzed_cluster = analyze(cluster, progress);
+    classify::classify(analyzed_cluster)
 }
 
 #[instrument(skip_all, level = "debug", fields(
@@ -154,406 +379,77 @@ fn calculate_backup_progress(
     progress
 }
 
-fn analyze(cluster: Cluster, backup_progress: HashMap<String, u16>) -> ClusterHealth {
+fn analyze(cluster: Cluster, backup_progress: HashMap<String, u16>) -> AnalyzedCluster {
+    let mut verdict = Verdict::default();
+
     let primaries: Vec<_> = cluster.primaries().collect();
     let replicas: Vec<_> = cluster.replicas().collect();
 
-    let reachable_count = primaries.len() + replicas.len();
-
-    // Zero nodes reachable - truly unknown state
-    if reachable_count == 0 {
-        return ClusterHealth::Unknown {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress,
-            },
-            reachable_nodes: 0,
-            reason: Reason::NoNodesReachable,
+    // No reachable nodes (all Role::Unknown or empty cluster) - Unknown state.
+    if primaries.is_empty() && replicas.is_empty() {
+        verdict.cluster_verdict = Some(ClusterVerdict::NoNodesReachable);
+        return AnalyzedCluster {
+            cluster,
+            backup_progress,
+            verdict,
         };
     }
 
-    // No primaries found - Critical state (even if we only see replicas)
+    // Replicas reachable but no primary - Critical.
     if primaries.is_empty() {
-        return ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress,
-            },
-            reason: Reason::NoPrimary,
+        verdict.cluster_verdict = Some(ClusterVerdict::NoPrimary);
+        return AnalyzedCluster {
+            cluster,
+            backup_progress,
+            verdict,
         };
     }
 
     // Multiple primaries - Critical (split brain)
     if primaries.len() > 1 {
         let split_brain_info = resolve_split_brain(&primaries, &replicas);
-        return ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress,
-            },
-            reason: Reason::SplitBrain(split_brain_info),
+        verdict.cluster_verdict = Some(ClusterVerdict::SplitBrain(split_brain_info));
+        return AnalyzedCluster {
+            cluster,
+            backup_progress,
+            verdict,
+        };
+    }
+
+    if replicas.len() > 2 {
+        verdict.cluster_verdict = Some(ClusterVerdict::UnexpectedTopology {
+            replica_count: replicas.len(),
+        });
+        return AnalyzedCluster {
+            cluster,
+            backup_progress,
+            verdict,
         };
     }
 
     // At this point we have exactly 1 primary
     let primary = primaries[0];
 
-    // Check for archive failure (archive_mode=on but never succeeded)
-    if let Some((failed_count, last_failed_wal)) = check_archive_failure(primary) {
-        return ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress,
-            },
-            reason: Reason::ArchiveFailure {
-                failed_count,
-                last_failed_wal,
-            },
-        };
+    check_archive(primary, &mut verdict);
+    check_sync_commit(primary, &mut verdict);
+    check_failover(primary, &mut verdict);
+    check_lag(primary, &replicas, &mut verdict);
+    check_quorum(primary, &replicas, &mut verdict);
+    check_chained_replication(primary, &replicas, &mut verdict);
+    check_writes_unprotected(primary, &replicas, &mut verdict);
+    check_writes_blocked(primary, &mut verdict);
+
+    for node in cluster.nodes() {
+        check_disk_errors(node, &mut verdict);
+        check_streaming(node, &mut verdict);
+        check_unreachable(node, primary, &mut verdict);
     }
 
-    // Check if failover occurred (primary is not db001)
-    let failover = is_failover_node(&primary.node_name);
-
-    // Calculate max replication lag from primary's perspective
-    let max_lag = calculate_max_lag(primary);
-
-    // Count streaming replicas (replicas with active wal_receiver)
-    let streaming_replicas: Vec<_> = replicas
-        .iter()
-        .filter(|r| is_replica_streaming(r))
-        .collect();
-    let rebuilding_count = replicas.len() - streaming_replicas.len();
-
-    // Detect chained replication (replica replicating from another replica)
-    let chained_replica = detect_chained_replica(primary, &replicas);
-
-    // Pre-compute sync_commit status for no-replicas case (avoids borrow issues)
-    let sync_commit_off = is_sync_commit_off(primary);
-
-    // Replicas whose sync_state is not Quorum (we require quorum for all streaming replicas)
-    let non_quorum_replicas = find_non_quorum_replicas(primary);
-
-    let signals = ClusterSignals {
-        failover,
-        max_lag,
-        rebuilding_count,
-        chained_replica,
-        sync_commit_off,
-        non_quorum_replicas,
-    };
-
-    // Determine health based on replica count and lag
-    match replicas.len() {
-        2 => analyze_full_redundancy(cluster, backup_progress, signals),
-        1 => analyze_one_replica_down(cluster, backup_progress, max_lag),
-        0 => analyze_no_replicas(cluster, backup_progress, sync_commit_off),
-        _ => ClusterHealth::Unknown {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress,
-            },
-            reachable_nodes: reachable_count,
-            reason: Reason::UnexpectedTopology,
-        },
+    AnalyzedCluster {
+        cluster,
+        backup_progress,
+        verdict,
     }
-}
-
-/// Pre-computed signals fed into the per-topology analyzers.
-struct ClusterSignals {
-    failover: bool,
-    max_lag: u64,
-    rebuilding_count: usize,
-    chained_replica: Option<ChainedReplicaInfo>,
-    sync_commit_off: bool,
-    non_quorum_replicas: Vec<String>,
-}
-
-/// Analyze a cluster with full redundancy (2 replicas visible).
-///
-/// Returns Healthy if all conditions are met, otherwise Degraded with appropriate reason.
-fn analyze_full_redundancy(
-    cluster: Cluster,
-    backup_progress: HashMap<String, u16>,
-    signals: ClusterSignals,
-) -> ClusterHealth {
-    let ClusterSignals {
-        failover,
-        max_lag,
-        rebuilding_count,
-        chained_replica,
-        sync_commit_off,
-        non_quorum_replicas,
-    } = signals;
-
-    // If ALL replicas are not streaming AND sync replication is disabled,
-    // writes are unprotected - this is Critical, not just Degraded
-    if rebuilding_count == 2 && sync_commit_off {
-        return ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress,
-            },
-            reason: Reason::WritesUnprotected,
-        };
-    }
-
-    // Check for rebuilding replicas
-    if rebuilding_count > 0 {
-        return ClusterHealth::Degraded {
-            lag: max_lag,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress,
-            },
-            reason: Reason::RebuildingReplica,
-        };
-    }
-
-    if max_lag > LAG_THRESHOLD_BYTES {
-        return ClusterHealth::Degraded {
-            lag: max_lag,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress,
-            },
-            reason: Reason::HighReplicationLag,
-        };
-    }
-
-    if let Some(chained) = chained_replica {
-        // Chained replication is a degraded topology (less redundancy)
-        return ClusterHealth::Degraded {
-            lag: max_lag,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress,
-            },
-            reason: Reason::ChainedReplica {
-                chained_replica: chained.chained_replica,
-                upstream_replica: chained.upstream_replica,
-            },
-        };
-    }
-
-    if !non_quorum_replicas.is_empty() {
-        return ClusterHealth::Degraded {
-            lag: max_lag,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress,
-            },
-            reason: Reason::NotInQuorum {
-                replicas: non_quorum_replicas,
-            },
-        };
-    }
-
-    ClusterHealth::Healthy {
-        failover,
-        cluster: AnalyzedCluster {
-            cluster,
-            backup_progress,
-        },
-    }
-}
-
-/// Analyze a cluster with one replica down (1 replica visible).
-///
-/// Always returns Degraded with `OneReplicaDown` reason.
-fn analyze_one_replica_down(
-    cluster: Cluster,
-    backup_progress: HashMap<String, u16>,
-    max_lag: u64,
-) -> ClusterHealth {
-    ClusterHealth::Degraded {
-        lag: max_lag,
-        cluster: AnalyzedCluster {
-            cluster,
-            backup_progress,
-        },
-        reason: Reason::OneReplicaDown,
-    }
-}
-
-/// Analyze a cluster with no replicas visible.
-///
-/// Returns Critical with either `WritesUnprotected` (`sync_commit=off`) or `WritesBlocked` (`sync_commit=on`).
-fn analyze_no_replicas(
-    cluster: Cluster,
-    backup_progress: HashMap<String, u16>,
-    sync_commit_off: bool,
-) -> ClusterHealth {
-    let reason = if sync_commit_off {
-        Reason::WritesUnprotected
-    } else {
-        Reason::WritesBlocked
-    };
-    ClusterHealth::Critical {
-        cluster: AnalyzedCluster {
-            cluster,
-            backup_progress,
-        },
-        reason,
-    }
-}
-
-/// Check if this node is a failover node (not db001).
-fn is_failover_node(node_name: &str) -> bool {
-    // Node naming convention: env-pg-appXXX-dbYYY.zone.example.com
-    // db001 is the original primary, db002/db003 are replicas
-    // If db002 or db003 is primary, failover has occurred
-    !node_name.contains("-db001")
-}
-
-/// Calculate maximum replication lag from primary health data
-/// Only considers actual replica connections, excludes backup operations (`pg_basebackup`, etc.)
-fn calculate_max_lag(primary: &AnalyzedNode) -> u64 {
-    if let Role::Primary { health } = &primary.role {
-        // Calculate lag from LSN differences (sent_lsn - replay_lsn)
-        // This is the actual byte lag, not a time-based estimate
-        health
-            .replication
-            .iter()
-            .filter(|r| {
-                // Only include actual streaming replicas, exclude backup operations
-                r.state == "streaming"
-                    && !matches!(
-                        r.application_name.as_str(),
-                        "pg_basebackup" | "pg_dump" | "pg_dumpall"
-                    )
-            })
-            .filter_map(|r| {
-                // For streaming replicas, use replay_lsn (or flush_lsn as fallback)
-                let effective_lsn = r.replay_lsn.as_deref().or(r.flush_lsn.as_deref());
-                if let (Some(sent), Some(replay)) = (r.sent_lsn.as_deref(), effective_lsn) {
-                    pg_lsn_diff(sent, replay)
-                } else {
-                    None
-                }
-            })
-            .max()
-            .unwrap_or(0)
-    } else {
-        0
-    }
-}
-
-/// Check if a replica is actively streaming (has `wal_receiver`).
-fn is_replica_streaming(node: &AnalyzedNode) -> bool {
-    if let Role::Replica { health } = &node.role {
-        health.wal_receiver.is_some()
-    } else {
-        false
-    }
-}
-
-/// Check if writes are unprotected (no synchronous replication).
-/// This is true when:
-/// - `synchronous_commit` is "off" or "local"
-///   Check if archive command has never succeeded since this node became primary.
-///
-/// Returns `Some((failed_count`, `last_failed_wal`)) if:
-/// - `archive_mode` = "on"
-/// - `archived_count` = 0 (no successful archives)
-/// - `failed_count` > 0 (there have been failures)
-///
-/// TODO: Consider adding Degraded state when `last_failed_time > last_archived_time`
-/// (archive was working but most recent attempt failed). WAL archives at least every 15 min.
-fn check_archive_failure(primary: &AnalyzedNode) -> Option<(i64, Option<String>)> {
-    let Role::Primary { health } = &primary.role else {
-        return None;
-    };
-
-    let archive_mode = health.configuration.get("archive_mode")?;
-    if archive_mode != "on" {
-        return None;
-    }
-
-    let archiver = &health.archiver;
-    if archiver.archived_count == 0 && archiver.failed_count > 0 {
-        Some((archiver.failed_count, archiver.last_failed_wal.clone()))
-    } else {
-        None
-    }
-}
-
-/// - OR `synchronous_standby_names` is empty (even with `remote_apply`, writes won't block)
-///
-/// See: <https://postgresqlco.nf/doc/en/param/synchronous_commit>/.
-fn is_sync_commit_off(primary: &AnalyzedNode) -> bool {
-    if let Role::Primary { health } = &primary.role {
-        let sync_commit_off = health
-            .configuration
-            .get("synchronous_commit")
-            .is_some_and(|v| v == "off" || v == "local");
-
-        let standby_names_empty = health
-            .configuration
-            .get("synchronous_standby_names")
-            .is_some_and(std::string::String::is_empty);
-
-        sync_commit_off || standby_names_empty
-    } else {
-        false
-    }
-}
-
-/// Returns `application_names` of replicas whose `sync_state` is not Quorum.
-fn find_non_quorum_replicas(primary: &AnalyzedNode) -> Vec<String> {
-    let Role::Primary { health } = &primary.role else {
-        return Vec::new();
-    };
-    health
-        .replication
-        .iter()
-        .filter(|conn| !matches!(conn.sync_state, PgSyncSettings::Quorum))
-        .map(|conn| conn.application_name.clone())
-        .collect()
-}
-
-/// Information about a chained replica.
-struct ChainedReplicaInfo {
-    /// The replica that is chained.
-    chained_replica: String,
-    /// The upstream replica it's replicating from.
-    upstream_replica: String,
-}
-
-/// Detect if any replica is replicating from another replica instead of the primary.
-///
-/// Returns information about the first chained replica found, if any.
-fn detect_chained_replica(
-    primary: &AnalyzedNode,
-    replicas: &[&AnalyzedNode],
-) -> Option<ChainedReplicaInfo> {
-    let primary_ip = primary.ip_address.to_string();
-
-    // Build a map of replica IPs to replica names for lookup
-    let replica_ips: HashMap<String, &str> = replicas
-        .iter()
-        .map(|r| (r.ip_address.to_string(), r.node_name.as_str()))
-        .collect();
-
-    for replica in replicas {
-        if let Role::Replica { health } = &replica.role
-            && let Some(wal_receiver) = &health.wal_receiver
-        {
-            let sender_ip = &wal_receiver.sender_host;
-
-            // If sender_host is not the primary's IP, check if it's another replica
-            if sender_ip != &primary_ip
-                && let Some(&upstream_name) = replica_ips.get(sender_ip)
-            {
-                return Some(ChainedReplicaInfo {
-                    chained_replica: replica.node_name.clone(),
-                    upstream_replica: upstream_name.to_owned(),
-                });
-            }
-        }
-    }
-
-    None
 }
 
 /// Extract timeline ID from a primary node.
@@ -564,104 +460,6 @@ fn get_timeline(node: &AnalyzedNode) -> Option<i32> {
         Role::Primary { health } => Some(health.timeline_id),
         Role::Unknown | Role::UnknownPrimary | Role::UnknownReplica | Role::Replica { .. } => None,
     }
-}
-
-/// Inspect `disk_check` results on each node and upgrade `ClusterHealth` if warranted.
-///
-/// Rules (in priority order):
-/// - Unknown and Critical (pg-based): left unchanged
-/// - Any node has `filesystem_errors` > 0: upgrade to Critical { `FilesystemErrors` }
-/// - Any node has io/block errors, and current health is Healthy: upgrade to Degraded { `DiskIoErrors` }
-fn apply_disk_verdict(health: ClusterHealth) -> ClusterHealth {
-    use crate::v2::scan::disk_check::DiskCheckOutcome;
-
-    if matches!(
-        health,
-        ClusterHealth::Unknown { .. } | ClusterHealth::Critical { .. }
-    ) {
-        return health;
-    }
-
-    let (worst_fs, worst_io) = {
-        let cluster_ref = health.cluster();
-        let mut worst_fs: Option<(String, u32)> = None;
-        let mut worst_io: Option<(String, u32, u32)> = None;
-
-        #[expect(clippy::needless_else, reason = "conflicting lints")]
-        for node in &cluster_ref.cluster.nodes {
-            if let Some(DiskCheckOutcome::Checked(result)) = &node.disk_check {
-                if result.filesystem_errors > 0 {
-                    if worst_fs
-                        .as_ref()
-                        .is_none_or(|(_, c)| result.filesystem_errors > *c)
-                    {
-                        worst_fs = Some((node.node_name.clone(), result.filesystem_errors));
-                    }
-                } else if result.io_errors > 0 || result.block_errors > 0 {
-                    worst_io.get_or_insert((
-                        node.node_name.clone(),
-                        result.io_errors,
-                        result.block_errors,
-                    ));
-                } else {
-                }
-            }
-        }
-        (worst_fs, worst_io)
-    };
-
-    if worst_fs.is_none() && worst_io.is_none() {
-        return health;
-    }
-
-    if let Some((node, count)) = worst_fs {
-        let cluster = match health {
-            ClusterHealth::Healthy { cluster, .. } | ClusterHealth::Degraded { cluster, .. } => {
-                cluster
-            }
-            ClusterHealth::Critical { .. } | ClusterHealth::Unknown { .. } => return health,
-        };
-        return ClusterHealth::Critical {
-            cluster,
-            reason: Reason::FilesystemErrors { node, count },
-        };
-    }
-
-    if let ClusterHealth::Healthy { cluster, .. } = health {
-        let (node, io_errors, block_errors) = worst_io.unwrap();
-        return ClusterHealth::Degraded {
-            lag: 0,
-            cluster,
-            reason: Reason::DiskIoErrors {
-                node,
-                io_errors,
-                block_errors,
-            },
-        };
-    }
-
-    health
-}
-
-/// Calculate byte difference between two `PostgreSQL` LSNs
-/// LSN format: "XXX/YYYYYYYY" where both parts are hexadecimal
-/// Returns None if LSNs are invalid.
-fn pg_lsn_diff(lsn1: &str, lsn2: &str) -> Option<u64> {
-    fn parse_lsn(lsn: &str) -> Option<u64> {
-        let parts: Vec<&str> = lsn.split('/').collect();
-        if parts.len() != 2 {
-            return None;
-        }
-        let high = u64::from_str_radix(parts[0], 16).ok()?;
-        let low = u64::from_str_radix(parts[1], 16).ok()?;
-        Some((high << 32) | low)
-    }
-
-    let pos1 = parse_lsn(lsn1)?;
-    let pos2 = parse_lsn(lsn2)?;
-
-    // Return absolute difference
-    Some(pos1.abs_diff(pos2))
 }
 
 /// Estimate `pg_basebackup` progress by comparing primary DB size vs replica filesystem usage
@@ -684,145 +482,10 @@ fn estimate_backup_progress(primary_used_bytes: u64, replica_used_bytes: u64) ->
     progress.min(10000.0) as u16
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub struct AnalyzedCluster {
-    pub cluster: Cluster,
-    /// Backup progress for `pg_basebackup` connections, mapped by `client_addr`
-    /// Key: client IP address, Value: progress (pct * 100, e.g., 4156 = 41.56%).
-    pub backup_progress: HashMap<String, u16>,
-}
-
-impl AnalyzedCluster {
-    /// Get the cluster name.
-    pub fn name(&self) -> &str {
-        &self.cluster.name
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-/// Represents the overall health of the `PostgreSQL` cluster.
-pub enum ClusterHealth {
-    /// ✅ The cluster is fully operational and redundant.
-    ///
-    /// - One primary and two replicas are online.
-    /// - Replication lag is within the acceptable threshold (< 5s).
-    /// - Quorum is satisfied.
-    Healthy {
-        failover: bool,
-        cluster: AnalyzedCluster,
-    },
-
-    /// ⚠️ The cluster is operational but has lost some redundancy or performance.
-    ///    Customer impact is low, but the risk of a full outage is elevated.
-    ///
-    /// - **Reduced Redundancy:** One of the two replicas is offline or unhealthy.
-    /// - **High Lag:** The primary is up, and replicas are connected, but replication
-    ///   lag exceeds the 5s threshold.
-    Degraded {
-        lag: u64,
-        cluster: AnalyzedCluster,
-        reason: Reason,
-    },
-    /// 🚨 The cluster is in a non-operational or dangerous state requiring immediate
-    ///    human intervention. Data is at risk, writes are failing, or the cluster is
-    ///    operating without any redundancy.
-    ///
-    /// - **Split Brain:** The monitor detects more than one active primary.
-    ///   While we do have quorum synchronous commit enabled, this is still a
-    ///   dangerous state that requires immediate attention.
-    /// - **`WritesBlocked`:** Primary has `sync_commit=on` but no sync replicas to satisfy quorum.
-    /// - **`WritesUnprotected`:** Primary has `sync_commit=off` with no replicas (DR mode).
-    /// - **`NoPrimary`:** No primary found in the cluster.
-    Critical {
-        cluster: AnalyzedCluster,
-        reason: Reason,
-    },
-
-    /// ❓ The state of the cluster cannot be determined.
-    ///
-    /// - The monitoring tool cannot connect to any nodes.
-    /// - Unexpected cluster topology.
-    Unknown {
-        cluster: AnalyzedCluster,
-        reachable_nodes: usize,
-        reason: Reason,
-    },
-}
-
-impl ClusterHealth {
-    /// Returns a reference to the analyzed cluster.
-    pub fn cluster(&self) -> &AnalyzedCluster {
-        match self {
-            ClusterHealth::Healthy { cluster, .. }
-            | ClusterHealth::Degraded { cluster, .. }
-            | ClusterHealth::Critical { cluster, .. }
-            | ClusterHealth::Unknown { cluster, .. } => cluster,
-        }
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub enum Reason {
-    // Degraded reasons
-    OneReplicaDown,
-    HighReplicationLag,
-    /// A replica has `wal_receiver` = None, indicating it's rebuilding or disconnected.
-    RebuildingReplica,
-    /// A replica is replicating from another replica instead of the primary (cascading replication).
-    ChainedReplica {
-        /// The replica that is chained (replicating from another replica).
-        chained_replica: String,
-        /// The upstream replica it's replicating from.
-        upstream_replica: String,
-    },
-    /// One or more streaming replicas have a `sync_state` other than `quorum`.
-    NotInQuorum {
-        /// `application_name` of each replica whose `sync_state` is not Quorum.
-        replicas: Vec<String>,
-    },
-
-    // Critical reasons
-    /// No primary found in the cluster.
-    NoPrimary,
-    /// Multiple nodes return `pg_is_in_recovery()` = false.
-    SplitBrain(SplitBrainInfo),
-    /// Primary has `sync_commit=on` but no sync replicas - writes are blocked.
-    WritesBlocked,
-    /// Primary has `sync_commit=off` with no replicas - DR mode, no redundancy.
-    WritesUnprotected,
-    /// Archive command has never succeeded since becoming primary.
-    ArchiveFailure {
-        failed_count: i64,
-        last_failed_wal: Option<String>,
-    },
-
-    // Unknown reasons
-    /// Cannot connect to any nodes in the cluster.
-    NoNodesReachable,
-    /// Cluster has unexpected topology (e.g., more than 3 nodes).
-    UnexpectedTopology,
-
-    // Disk reasons (from dmesg within the recency window)
-    /// I/O or block-device errors found in dmesg.
-    DiskIoErrors {
-        node: String,
-        io_errors: u32,
-        block_errors: u32,
-    },
-    /// Filesystem-level errors found in dmesg.
-    FilesystemErrors {
-        node: String,
-        count: u32,
-    },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::{
-        tests_common::{healthy, unhealthy},
-        writer::units::parse_lag_to_bytes,
-    };
+    use crate::v2::tests_common::{healthy, unhealthy};
 
     use pretty_assertions::assert_eq;
 
@@ -830,31 +493,35 @@ mod tests {
     fn test_healthy_cluster() {
         let cluster = healthy::non_failover_cluster();
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Healthy {
-            failover: false,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Healthy {
+                    failover: false,
+                    ..
+                }
+            ),
+            "expected Healthy non-failover, got {actual:?}"
+        );
     }
 
     #[test]
     fn test_degraded_cluster_one_replica_down() {
         let cluster = unhealthy::db001_unreachable_failover_with_replica();
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Degraded {
-            lag: 0,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::OneReplicaDown,
-        };
-        assert_eq!(actual, expected);
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
+
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Degraded {
+                    reason: Reason::ReducedRedundancy,
+                    ..
+                }
+            ),
+            "expected Degraded ReducedRedundancy, got {actual:?}"
+        );
     }
 
     #[test]
@@ -862,85 +529,57 @@ mod tests {
         // Scenario: db002 is primary (failover occurred), db003 is streaming replica,
         // db001 is online but rebuilding (wal_receiver = None, old last_transaction_replay_at)
         let cluster = unhealthy::db001_rebuilding_after_failover();
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Degraded {
-            lag: 0,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::RebuildingReplica,
-        };
-        assert_eq!(actual, expected);
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
+
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Degraded {
+                    reason: Reason::RebuildingReplica,
+                    ..
+                }
+            ),
+            "expected Degraded RebuildingReplica, got {actual:?}"
+        );
     }
 
     #[test]
     fn test_degraded_cluster_chained_replica() {
         // Scenario: db001 is primary, db002 replicates from db001, db003 replicates from db002 (chained)
         let cluster = unhealthy::chained_replica();
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Degraded {
-            lag: 0,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::ChainedReplica {
-                chained_replica: "dev-pg-app001-db003.sto3.example.com".to_owned(),
-                upstream_replica: "dev-pg-app001-db002.sto2.example.com".to_owned(),
-            },
-        };
-        assert_eq!(actual, expected);
-    }
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-    // ==================== Helper function tests ====================
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Degraded {
+                    reason: Reason::ChainedReplica,
+                    ..
+                }
+            ),
+            "expected Degraded ChainedReplica, got {actual:?}"
+        );
 
-    #[test]
-    fn test_is_failover_node_db001_is_not_failover() {
-        assert!(!is_failover_node("dev-pg-app001-db001.sto1.example.com"));
-        assert!(!is_failover_node("prod-pg-app007-db001.sto2.example.com"));
-    }
-
-    #[test]
-    fn test_is_failover_node_db002_is_failover() {
-        assert!(is_failover_node("dev-pg-app001-db002.sto1.example.com"));
-        assert!(is_failover_node("prod-pg-app007-db002.sto2.example.com"));
-    }
-
-    #[test]
-    fn test_is_failover_node_db003_is_failover() {
-        assert!(is_failover_node("dev-pg-app001-db003.sto1.example.com"));
-        assert!(is_failover_node("prod-pg-app007-db003.sto3.example.com"));
-    }
-
-    #[test]
-    fn test_parse_lag_to_bytes_zero_lag() {
-        assert_eq!(parse_lag_to_bytes("00:00:00.001234"), Some(0));
-    }
-
-    #[test]
-    fn test_parse_lag_to_bytes_one_second() {
-        // 1 second * 16MB/s = 16,000,000 bytes
-        assert_eq!(parse_lag_to_bytes("00:00:01.000000"), Some(16_000_000));
-    }
-
-    #[test]
-    fn test_parse_lag_to_bytes_one_minute() {
-        // 60 seconds * 16MB/s = 960,000,000 bytes
-        assert_eq!(parse_lag_to_bytes("00:01:00.000000"), Some(960_000_000));
-    }
-
-    #[test]
-    fn test_parse_lag_to_bytes_complex() {
-        // 1h 30m 45s = 5445 seconds * 16MB/s = 87,120,000,000 bytes
-        assert_eq!(parse_lag_to_bytes("01:30:45.123456"), Some(87_120_000_000));
-    }
-
-    #[test]
-    fn test_parse_lag_to_bytes_invalid_format() {
-        assert_eq!(parse_lag_to_bytes("invalid"), None);
-        assert_eq!(parse_lag_to_bytes("00:00"), None);
-        assert_eq!(parse_lag_to_bytes(""), None);
+        #[expect(clippy::wildcard_enum_match_arm, reason = "it's a test")]
+        // The chained replica details (which replica, what upstream) live in the verdict.
+        let chained = actual
+            .cluster()
+            .verdict
+            .node_verdicts
+            .iter()
+            .find_map(|(name, v)| match v {
+                NodeVerdict::ChainedReplication { upstream } => {
+                    Some((name.as_str(), upstream.as_str()))
+                }
+                _ => None,
+            });
+        assert_eq!(
+            chained,
+            Some((
+                "dev-pg-app001-db003.sto3.example.com",
+                "dev-pg-app001-db002.sto2.example.com",
+            )),
+        );
     }
 }
 
@@ -951,13 +590,13 @@ mod cluster_state_tests {
         cluster::Cluster,
         scan::{
             AnalyzedNode, Role,
-            health_check_primary::{ArchiverStats, PrimaryHealthCheckResult},
+            disk_check::{DiskCheckOutcome, DiskCheckResult},
+            health_check_primary::{ArchiverStats, PgSyncSettings, PrimaryHealthCheckResult},
             health_check_replica::{LagInfo, ReplicaHealthCheckResult},
         },
         tests_common::{ClusterBuilder, NodeBuilder, PrimaryHealthBuilder, ReplicaHealthBuilder},
     };
     use chrono::Utc;
-    use std::net::Ipv4Addr;
 
     use pretty_assertions::assert_eq;
 
@@ -973,7 +612,7 @@ mod cluster_state_tests {
         builder.build()
     }
 
-    fn make_primary_health_with_config(
+    pub fn make_primary_health_with_config(
         replication_count: usize,
         replay_lag: Option<&str>,
         configuration: HashMap<String, String>,
@@ -981,20 +620,6 @@ mod cluster_state_tests {
         let mut builder = PrimaryHealthBuilder::new()
             .with_replication(replication_count)
             .with_config(configuration);
-        if let Some(lag) = replay_lag {
-            builder = builder.with_lag(lag);
-        }
-        builder.build()
-    }
-
-    pub fn make_primary_health_with_timeline(
-        replication_count: usize,
-        replay_lag: Option<&str>,
-        timeline_id: i32,
-    ) -> PrimaryHealthCheckResult {
-        let mut builder = PrimaryHealthBuilder::new()
-            .with_replication(replication_count)
-            .with_timeline(timeline_id);
         if let Some(lag) = replay_lag {
             builder = builder.with_lag(lag);
         }
@@ -1009,25 +634,11 @@ mod cluster_state_tests {
         NodeBuilder::new(name).with_id(id).build_with_role(role)
     }
 
-    pub fn make_node_with_ip(
-        id: u32,
-        name: &str,
-        role: Role,
-        ip_address: Ipv4Addr,
-    ) -> AnalyzedNode {
-        NodeBuilder::new(name)
-            .with_id(id)
-            .with_ip(ip_address)
-            .build_with_role(role)
-    }
-
     pub fn make_cluster(nodes: Vec<AnalyzedNode>) -> Cluster {
         ClusterBuilder::new("dev-pg-app001")
             .with_nodes(nodes)
             .build()
     }
-
-    // ==================== Unknown state tests ====================
 
     #[test]
     fn test_unknown_when_all_nodes_unreachable() {
@@ -1037,17 +648,19 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Unknown {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reachable_nodes: 0,
-            reason: Reason::NoNodesReachable,
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Unknown {
+                    reachable_nodes: 0,
+                    reason: Reason::NoNodesReachable,
+                    ..
+                }
+            ),
+            "expected Unknown NoNodesReachable, got {actual:?}"
+        );
     }
 
     #[test]
@@ -1065,19 +678,19 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::WritesBlocked,
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Critical {
+                    reason: Reason::WritesBlocked,
+                    ..
+                }
+            ),
+            "expected Critical WritesBlocked, got {actual:?}"
+        );
     }
-
-    // ==================== Critical state tests ====================
 
     #[test]
     fn test_critical_when_no_primary_found() {
@@ -1105,19 +718,19 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::NoPrimary,
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Critical {
+                    reason: Reason::NoPrimary,
+                    ..
+                }
+            ),
+            "expected Critical NoPrimary, got {actual:?}"
+        );
     }
-
-    // ==================== Degraded state tests ====================
 
     #[test]
     fn test_degraded_high_replication_lag() {
@@ -1146,21 +759,19 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
+
         // LSN diff: 48F/6957B540 - 48F/6357B540 = 0x06000000 = 100,663,296 bytes (~96MB)
-        let expected = ClusterHealth::Degraded {
-            lag: 100_663_296,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
+        let ClusterHealth::Degraded {
             reason: Reason::HighReplicationLag,
+            lag,
+            ..
+        } = &actual
+        else {
+            panic!("expected Degraded HighReplicationLag, got {actual:?}");
         };
-
-        assert_eq!(actual, expected);
+        assert_eq!(*lag, 100_663_296);
     }
-
-    // ==================== Healthy with failover tests ====================
 
     #[test]
     fn test_healthy_with_failover_db002_is_primary() {
@@ -1188,16 +799,12 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Healthy {
-            failover: true,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(&actual, ClusterHealth::Healthy { failover: true, .. }),
+            "expected Healthy with failover, got {actual:?}"
+        );
     }
 
     #[test]
@@ -1226,19 +833,13 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Healthy {
-            failover: true,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(&actual, ClusterHealth::Healthy { failover: true, .. }),
+            "expected Healthy with failover, got {actual:?}"
+        );
     }
-
-    // ==================== Critical: WritesBlocked and WritesUnprotected tests ====================
 
     #[test]
     fn test_critical_writes_blocked_sync_commit_on_no_replicas() {
@@ -1259,16 +860,18 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::WritesBlocked,
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Critical {
+                    reason: Reason::WritesBlocked,
+                    ..
+                }
+            ),
+            "expected Critical WritesBlocked, got {actual:?}"
+        );
     }
 
     #[test]
@@ -1290,16 +893,18 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::WritesUnprotected,
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Critical {
+                    reason: Reason::WritesUnprotected,
+                    ..
+                }
+            ),
+            "expected Critical WritesUnprotected, got {actual:?}"
+        );
     }
 
     #[test]
@@ -1320,16 +925,18 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::WritesUnprotected,
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Critical {
+                    reason: Reason::WritesUnprotected,
+                    ..
+                }
+            ),
+            "expected Critical WritesUnprotected, got {actual:?}"
+        );
     }
 
     #[test]
@@ -1355,16 +962,18 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::WritesUnprotected,
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Critical {
+                    reason: Reason::WritesUnprotected,
+                    ..
+                }
+            ),
+            "expected Critical WritesUnprotected, got {actual:?}"
+        );
     }
 
     #[test]
@@ -1414,16 +1023,18 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::WritesUnprotected,
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Critical {
+                    reason: Reason::WritesUnprotected,
+                    ..
+                }
+            ),
+            "expected Critical WritesUnprotected, got {actual:?}"
+        );
     }
 
     #[test]
@@ -1476,27 +1087,42 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Critical {
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::ArchiveFailure {
-                failed_count: 16452,
-                last_failed_wal: Some("000000120000058300000073".to_owned()),
-            },
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Critical {
+                    reason: Reason::ArchiveFailure,
+                    ..
+                }
+            ),
+            "expected Critical ArchiveFailure, got {actual:?}"
+        );
+
+        #[expect(clippy::wildcard_enum_match_arm, reason = "it's a test")]
+        let archive = actual
+            .cluster()
+            .verdict
+            .node_verdicts
+            .iter()
+            .find_map(|(_, v)| match v {
+                NodeVerdict::ArchiveFailure {
+                    failed_count,
+                    last_wal,
+                } => Some((*failed_count, last_wal.as_deref())),
+                _ => None,
+            });
+        assert_eq!(archive, Some((16452, Some("000000120000058300000073"))),);
     }
 
-    // ==================== NotInQuorum tests ====================
-
     #[test]
-    fn test_degraded_when_replicas_are_async_with_empty_standby_names() {
+    fn test_critical_sync_commit_off_when_standby_names_empty_with_async_replicas() {
         // Mirrors the real dump: synchronous_commit=on, synchronous_standby_names="",
-        // both replicas streaming with sync_state=async. Cluster must be Degraded.
+        // both replicas streaming with sync_state=async. Empty standby_names
+        // means postgres can't actually sync — sync replication is effectively
+        // disabled at the primary regardless of sync_commit value. This is a
+        // misconfiguration that puts writes at risk → Critical SyncCommitOff.
         let mut config = HashMap::new();
         config.insert("synchronous_commit".to_owned(), "on".to_owned());
         config.insert("synchronous_standby_names".to_owned(), String::new());
@@ -1531,32 +1157,31 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
-        let expected = ClusterHealth::Degraded {
-            lag: 0,
-            cluster: AnalyzedCluster {
-                cluster,
-                backup_progress: HashMap::new(),
-            },
-            reason: Reason::NotInQuorum {
-                replicas: vec![
-                    "dev_pg_app001_db002".to_owned(),
-                    "dev_pg_app001_db003".to_owned(),
-                ],
-            },
-        };
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
 
-        assert_eq!(actual, expected);
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Critical {
+                    reason: Reason::SyncCommitOff,
+                    ..
+                }
+            ),
+            "expected Critical SyncCommitOff, got {actual:?}"
+        );
     }
 
     #[test]
     fn test_degraded_when_one_replica_is_potential() {
         // Only one of the two replicas is in Quorum; the other is Potential.
         // Strict policy: any non-quorum replica → Degraded.
-        let primary_health = PrimaryHealthBuilder::new()
+        // The builder applies sync_state uniformly to all replicas, so we
+        // override one entry post-build to get a heterogeneous shape.
+        let mut primary_health = PrimaryHealthBuilder::new()
             .with_replication(2)
-            .with_sync_state(PgSyncSettings::Potential)
+            .with_sync_state(PgSyncSettings::Quorum)
             .build();
+        primary_health.replication[1].sync_state = PgSyncSettings::Potential;
 
         let cluster = make_cluster(vec![
             make_node(
@@ -1582,12 +1207,12 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = analyze(cluster.clone(), HashMap::new());
+        let actual = classify::classify(analyze(cluster.clone(), HashMap::new()));
         assert!(
             matches!(
                 actual,
                 ClusterHealth::Degraded {
-                    reason: Reason::NotInQuorum { .. },
+                    reason: Reason::NotInQuorum,
                     ..
                 }
             ),
@@ -1595,130 +1220,18 @@ mod cluster_state_tests {
         );
     }
 
-    // ==================== is_sync_commit_off helper tests ====================
-
-    #[test]
-    fn test_is_sync_commit_off_returns_true_for_off() {
-        let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_owned(), "off".to_owned());
-
-        let node = make_node(
-            1,
-            "dev-pg-app001-db001.sto1.example.com",
-            Role::Primary {
-                health: Box::new(make_primary_health_with_config(0, None, config)),
-            },
-        );
-
-        assert!(is_sync_commit_off(&node));
-    }
-
-    #[test]
-    fn test_is_sync_commit_off_returns_true_for_local() {
-        let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_owned(), "local".to_owned());
-
-        let node = make_node(
-            1,
-            "dev-pg-app001-db001.sto1.example.com",
-            Role::Primary {
-                health: Box::new(make_primary_health_with_config(0, None, config)),
-            },
-        );
-
-        assert!(is_sync_commit_off(&node));
-    }
-
-    #[test]
-    fn test_is_sync_commit_off_returns_false_for_on() {
-        let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_owned(), "on".to_owned());
-
-        let node = make_node(
-            1,
-            "dev-pg-app001-db001.sto1.example.com",
-            Role::Primary {
-                health: Box::new(make_primary_health_with_config(0, None, config)),
-            },
-        );
-
-        assert!(!is_sync_commit_off(&node));
-    }
-
-    #[test]
-    fn test_is_sync_commit_off_returns_false_for_remote_write() {
-        let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_owned(), "remote_write".to_owned());
-
-        let node = make_node(
-            1,
-            "dev-pg-app001-db001.sto1.example.com",
-            Role::Primary {
-                health: Box::new(make_primary_health_with_config(0, None, config)),
-            },
-        );
-
-        assert!(!is_sync_commit_off(&node));
-    }
-
-    #[test]
-    fn test_is_sync_commit_off_returns_false_for_remote_apply() {
-        let mut config = HashMap::new();
-        config.insert("synchronous_commit".to_owned(), "remote_apply".to_owned());
-
-        let node = make_node(
-            1,
-            "dev-pg-app001-db001.sto1.example.com",
-            Role::Primary {
-                health: Box::new(make_primary_health_with_config(0, None, config)),
-            },
-        );
-
-        assert!(!is_sync_commit_off(&node));
-    }
-
-    #[test]
-    fn test_is_sync_commit_off_returns_false_when_missing() {
-        // When config is empty, default to assuming sync_commit is on
-        let node = make_node(
-            1,
-            "dev-pg-app001-db001.sto1.example.com",
-            Role::Primary {
-                health: Box::new(make_primary_health(0, None)),
-            },
-        );
-
-        assert!(!is_sync_commit_off(&node));
-    }
-
-    #[test]
-    fn test_is_sync_commit_off_returns_false_for_replica() {
-        let node = make_node(
-            1,
-            "dev-pg-app001-db001.sto1.example.com",
-            Role::Replica {
-                health: Box::new(make_replica_health()),
-            },
-        );
-
-        assert!(!is_sync_commit_off(&node));
-    }
-
-    // ==================== Disk verdict promotion tests ====================
-
     fn make_node_with_disk(
         id: u32,
         name: &str,
         role: Role,
-        disk: Option<crate::v2::scan::disk_check::DiskCheckOutcome>,
+        disk: Option<DiskCheckOutcome>,
     ) -> AnalyzedNode {
         let mut n = NodeBuilder::new(name).with_id(id).build_with_role(role);
         n.disk_check = disk;
         n
     }
 
-    fn checked(io: u32, fs: u32, blk: u32) -> crate::v2::scan::disk_check::DiskCheckOutcome {
-        use crate::v2::scan::disk_check::{DiskCheckOutcome, DiskCheckResult};
+    pub fn checked(io: u32, fs: u32, blk: u32) -> DiskCheckOutcome {
         DiskCheckOutcome::Checked(DiskCheckResult {
             io_errors: io,
             filesystem_errors: fs,
@@ -1756,20 +1269,24 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        let health = classify::classify(analyze(cluster, HashMap::new()));
         assert!(
             matches!(
                 &health,
                 ClusterHealth::Degraded {
-                    reason: Reason::DiskIoErrors {
-                        io_errors: 2,
-                        block_errors: 1,
-                        ..
-                    },
+                    reason: Reason::DiskIoErrors,
                     ..
                 }
             ),
             "expected Degraded DiskIoErrors, got {health:?}"
+        );
+        assert!(
+            health
+                .cluster()
+                .verdict
+                .node_verdicts
+                .iter()
+                .any(|(_, v)| { matches!(v, NodeVerdict::DiskIoErrors { io: 2, block: 1 }) })
         );
     }
 
@@ -1802,16 +1319,24 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        let health = classify::classify(analyze(cluster, HashMap::new()));
         assert!(
             matches!(
                 &health,
                 ClusterHealth::Critical {
-                    reason: Reason::FilesystemErrors { count: 3, .. },
+                    reason: Reason::FilesystemErrors,
                     ..
                 }
             ),
             "expected Critical FilesystemErrors, got {health:?}"
+        );
+        assert!(
+            health
+                .cluster()
+                .verdict
+                .node_verdicts
+                .iter()
+                .any(|(_, v)| { matches!(v, NodeVerdict::FilesystemErrors { count: 3 }) })
         );
     }
 
@@ -1843,16 +1368,24 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        let health = classify::classify(analyze(cluster, HashMap::new()));
         assert!(
             matches!(
                 &health,
                 ClusterHealth::Critical {
-                    reason: Reason::FilesystemErrors { count: 2, .. },
+                    reason: Reason::FilesystemErrors,
                     ..
                 }
             ),
             "expected Critical FilesystemErrors, got {health:?}"
+        );
+        assert!(
+            health
+                .cluster()
+                .verdict
+                .node_verdicts
+                .iter()
+                .any(|(_, v)| { matches!(v, NodeVerdict::FilesystemErrors { count: 2 }) })
         );
     }
 
@@ -1884,16 +1417,16 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        let health = classify::classify(analyze(cluster.clone(), HashMap::new()));
         assert!(
             matches!(
                 &health,
                 ClusterHealth::Degraded {
-                    reason: Reason::OneReplicaDown,
+                    reason: Reason::ReducedRedundancy,
                     ..
                 }
             ),
-            "expected Degraded OneReplicaDown (pg reason preserved), got {health:?}"
+            "expected Degraded ReducedRedundancy (pg reason preserved), got {health:?}"
         );
     }
 
@@ -1927,7 +1460,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        let health = classify::classify(analyze(cluster.clone(), HashMap::new()));
         assert!(
             matches!(
                 &health,
@@ -1972,7 +1505,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = apply_disk_verdict(analyze(cluster.clone(), HashMap::new()));
+        let health = classify::classify(analyze(cluster.clone(), HashMap::new()));
         assert!(
             matches!(&health, ClusterHealth::Healthy { .. }),
             "expected Healthy (failed disk check ignored), got {health:?}"

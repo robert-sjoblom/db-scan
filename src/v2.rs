@@ -59,8 +59,6 @@ pub(crate) mod tests_common {
         }
     }
 
-    // ==================== Test fixture builders ====================
-
     pub struct PrimaryHealthBuilder {
         replication_count: usize,
         replay_lag: Option<String>,
@@ -73,10 +71,15 @@ pub(crate) mod tests_common {
 
     impl PrimaryHealthBuilder {
         pub fn new() -> Self {
+            // archive_mode=on by default so check_archive doesn't flag every
+            // test fixture as ArchivingDisabled. Tests that need the missing
+            // case override via with_config.
+            let mut configuration = HashMap::new();
+            configuration.insert("archive_mode".to_owned(), "on".to_owned());
             Self {
                 replication_count: 0,
                 replay_lag: None,
-                configuration: HashMap::new(),
+                configuration,
                 timeline_id: 11,
                 archiver: ArchiverStats {
                     archived_count: 0,
@@ -107,12 +110,9 @@ pub(crate) mod tests_common {
         }
 
         pub fn with_config(mut self, configuration: HashMap<String, String>) -> Self {
-            self.configuration = configuration;
-            self
-        }
-
-        pub fn with_timeline(mut self, id: i32) -> Self {
-            self.timeline_id = id;
+            // Extend (not replace) so defaults like archive_mode=on persist
+            // unless the caller explicitly overrides the same key.
+            self.configuration.extend(configuration);
             self
         }
 
@@ -284,6 +284,11 @@ pub(crate) mod tests_common {
 
         pub fn with_id(mut self, id: u32) -> Self {
             self.id = id;
+            // PrimaryHealthBuilder generates client_addr as 10.8{i+2}.12.151
+            // for replication slot index i (so first replica = 10.82.12.151).
+            // Mirror the same convention here so make_node(2, _, Replica) gets
+            // an IP that check_lag/check_quorum can match against pg_stat_replication.
+            self.ip_address = Ipv4Addr::new(10, 80 + id as u8, 12, 151);
             self
         }
 
