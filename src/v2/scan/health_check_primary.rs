@@ -12,6 +12,42 @@ use crate::v2::{
     scan::{AnalyzedNode, Role},
 };
 
+/// Per-replica WAL sender state from `pg_stat_replication.state`.
+///
+/// Values mirror those Postgres exposes; `Unknown` is a forward-compat catch-all
+/// so a new state introduced by a future Postgres release doesn't fail the scan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplicationState {
+    Startup,
+    Catchup,
+    Streaming,
+    Backup,
+    Stopping,
+    #[serde(other)]
+    Unknown,
+}
+
+impl ReplicationState {
+    pub fn is_streaming(&self) -> bool {
+        matches!(self, ReplicationState::Streaming)
+    }
+}
+
+impl std::fmt::Display for ReplicationState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ReplicationState::Startup => "startup",
+            ReplicationState::Catchup => "catchup",
+            ReplicationState::Streaming => "streaming",
+            ReplicationState::Backup => "backup",
+            ReplicationState::Stopping => "stopping",
+            ReplicationState::Unknown => "unknown",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Per-replica replication state from `pg_stat_replication.sync_state`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -87,7 +123,7 @@ pub struct ReplicationConnection {
     pub client_port: Option<i32>,
     pub backend_start: DateTime<Utc>,
     pub backend_xmin: Option<String>,
-    pub state: String,
+    pub state: ReplicationState,
     /// LSN fields can be null for connections in "backup" state (e.g., `pg_basebackup`).
     pub sent_lsn: Option<String>,
     pub write_lsn: Option<String>,
@@ -281,6 +317,6 @@ mod tests {
         let conn: ReplicationConnection = serde_json::from_value(json).unwrap();
         assert_eq!(conn.sent_lsn, None);
         assert_eq!(conn.replay_lsn, None);
-        assert_eq!(conn.state, "backup");
+        assert_eq!(conn.state, ReplicationState::Backup);
     }
 }

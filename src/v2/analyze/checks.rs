@@ -147,7 +147,7 @@ pub(super) fn check_lag(primary: &AnalyzedNode, replicas: &[&AnalyzedNode], verd
             r.application_name.as_str(),
             "pg_basebackup" | "pg_dump" | "pg_dumpall"
         );
-        if r.state != "streaming" || backup_stream {
+        if !r.state.is_streaming() || backup_stream {
             continue;
         }
 
@@ -313,7 +313,7 @@ fn primary_sees_streaming(primary: &AnalyzedNode, node: &AnalyzedNode) -> bool {
     health
         .replication
         .iter()
-        .any(|c| c.state == "streaming" && c.client_addr.as_deref() == Some(node_ip.as_str()))
+        .any(|c| c.state.is_streaming() && c.client_addr.as_deref() == Some(node_ip.as_str()))
 }
 
 /// Calculate byte difference between two `PostgreSQL` LSNs
@@ -382,7 +382,7 @@ mod tests {
         },
         scan::{
             disk_check::DiskCheckOutcome,
-            health_check_primary::{ArchiverStats, PgSyncSettings},
+            health_check_primary::{ArchiverStats, PgSyncSettings, ReplicationState},
         },
         tests_common::{PrimaryHealthBuilder, ReplicaHealthBuilder},
     };
@@ -1036,7 +1036,7 @@ mod tests {
         let mut primary = primary_node(primary_health);
         if let Role::Primary { health } = &mut primary.role {
             health.replication[0].client_addr = Some(unreachable_replica.ip_address.to_string());
-            health.replication[0].state = "streaming".to_owned();
+            health.replication[0].state = ReplicationState::Streaming;
         }
         let mut verdict = Verdict::default();
 
