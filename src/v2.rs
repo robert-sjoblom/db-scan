@@ -18,7 +18,7 @@ pub(crate) mod tests_common {
             AnalyzedNode, Role,
             health_check_primary::{
                 ArchiverStats, PgSyncSettings, PrimaryHealthCheckResult, ReplicationConnection,
-                ReplicationSlot,
+                ReplicationSlot, ReplicationState,
             },
             health_check_replica::{LagInfo, ReplicaHealthCheckResult, WalReceiverInfo},
         },
@@ -145,7 +145,7 @@ pub(crate) mod tests_common {
                     client_port: Some(63512 + i as i32),
                     backend_start: Utc::now(),
                     backend_xmin: Some("621647066".to_owned()),
-                    state: "streaming".to_owned(),
+                    state: ReplicationState::Streaming,
                     sent_lsn: Some(base_lsn.to_owned()),
                     write_lsn: Some(lagging_lsn.to_owned()),
                     flush_lsn: Some(lagging_lsn.to_owned()),
