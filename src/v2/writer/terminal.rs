@@ -78,13 +78,9 @@ pub(crate) fn render_table(views: &[ClusterView], options: &WriterOptions) -> St
         let primary_str = &primary_strs[i];
         let replicas_str = &replicas_strs[i];
 
-        // Pad primary and replicas by display width, not byte length, to handle superscripts.
-        let primary_pad = max_primary + primary_str.len() - display_width(primary_str);
-        let replicas_pad = max_replicas + replicas_str.len() - display_width(replicas_str);
-
         let _ = writeln!(
             output,
-            "{:<status_padding$} {:<width_cluster$} {:<primary_pad$} {:<replicas_pad$} {:<width_lag$} {:<width_disk$} {}",
+            "{:<status_padding$} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {:<width_disk$} {}",
             status_str,
             view.name,
             primary_str,
@@ -94,8 +90,8 @@ pub(crate) fn render_table(views: &[ClusterView], options: &WriterOptions) -> St
             view.reason.short,
             status_padding = status_padding,
             width_cluster = max_cluster,
-            primary_pad = primary_pad,
-            replicas_pad = replicas_pad,
+            width_primary = max_primary,
+            width_replicas = max_replicas,
             width_lag = max_lag,
             width_disk = max_disk
         );
