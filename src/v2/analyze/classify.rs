@@ -99,6 +99,42 @@ mod tests {
         split_brain::SplitBrainInfo,
     };
 
+    // Reasons are picked via `max()` in classify, so PartialOrd defines the
+    // severity hierarchy. Each `higher > lower` pair locks one rung of the
+    // ladder, from most severe (top) to least severe (bottom). When adding a
+    // new Reason, add a pair here so a future re-ordering can't silently
+    // demote it.
+    /// Canonical severity rank used by `classify`'s `max()` selection.
+    /// Higher number = more severe.
+    ///
+    /// The match is exhaustive, so adding a new `Reason` variant without
+    /// assigning it a rank here is a compile error. `Unknown`-tier reasons
+    /// are never compared against `Critical`/`Degraded` ones by `classify`,
+    /// so their ranks are arbitrary.
+    fn severity_rank(r: &Reason) -> u8 {
+        match r {
+            // Unknown tier (rank arbitrary; not compared with other tiers).
+            Reason::NoNodesReachable => 0,
+            Reason::UnexpectedTopology => 1,
+            // Degraded tier, least → most severe.
+            Reason::DiskIoErrors => 10,
+            Reason::NotInQuorum => 11,
+            Reason::ChainedReplica => 12,
+            Reason::RebuildingReplica => 13,
+            Reason::HighReplicationLag => 14,
+            Reason::ReducedRedundancy => 15,
+            // Critical tier, least → most severe.
+            Reason::SyncCommitOff => 20,
+            Reason::ArchivingDisabled => 21,
+            Reason::ArchiveFailure => 22,
+            Reason::FilesystemErrors => 23,
+            Reason::WritesUnprotected => 24,
+            Reason::WritesBlocked => 25,
+            Reason::NoPrimary => 26,
+            Reason::SplitBrain => 27,
+        }
+    }
+
     #[rstest]
     #[case::writes_blocked(ClusterVerdict::WritesBlocked, Reason::WritesBlocked)]
     #[case::writes_unprotected(ClusterVerdict::WritesUnprotected, Reason::WritesUnprotected)]
@@ -157,5 +193,23 @@ mod tests {
     #[case::unexpected_topology(Reason::UnexpectedTopology, Tier::Unknown)]
     fn reason_to_tier(#[case] input: Reason, #[case] expected: Tier) {
         assert_eq!(Tier::from(&input), expected);
+    }
+
+    #[test]
+    fn reason_ordering_matches_severity_rank() {
+        use strum::IntoEnumIterator as _;
+
+        for a in Reason::iter() {
+            for b in Reason::iter() {
+                let ra = severity_rank(&a);
+                let rb = severity_rank(&b);
+                assert_eq!(
+                    a.cmp(&b),
+                    ra.cmp(&rb),
+                    "PartialOrd disagrees with severity_rank: \
+                     {a:?} (rank {ra}) vs {b:?} (rank {rb})",
+                );
+            }
+        }
     }
 }

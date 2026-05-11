@@ -118,10 +118,19 @@ impl ClusterHealth {
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[cfg_attr(test, derive(strum::EnumIter))]
 pub enum Reason {
-    // Degraded reasons (declaration order = severity rank within the tier;
-    // last variant in the tier wins via `max()` when multiple Degraded
-    // verdicts coexist).
+    // Declaration order = ascending severity; classify picks the worst via
+    // `max()`. Unknown reasons fire only when no nodes are reachable or the
+    // topology is unrecognized, so they never coexist with the tiers below.
+
+    // Unknown reasons
+    /// Cannot connect to any nodes in the cluster.
+    NoNodesReachable,
+    /// Cluster has unexpected topology (e.g., more than 3 nodes).
+    UnexpectedTopology,
+
+    // Degraded reasons (least → most severe within the tier).
     /// I/O or block-device errors found in dmesg.
     DiskIoErrors,
     /// One or more streaming replicas have a `sync_state` other than `quorum`.
@@ -135,29 +144,23 @@ pub enum Reason {
     /// outranks lower Degraded findings so it surfaces as the headline reason.
     ReducedRedundancy,
 
-    // Critical reasons (last variant in the tier wins).
+    // Critical reasons (least → most severe within the tier).
     /// Quorum sync is not activated.
     SyncCommitOff,
+    /// Archiving is not enabled.
+    ArchivingDisabled,
+    /// Archive command has never succeeded since becoming primary.
+    ArchiveFailure,
+    /// Filesystem-level errors found in dmesg.
+    FilesystemErrors,
+    /// Primary has `sync_commit=off` with no replicas - DR mode, no redundancy.
+    WritesUnprotected,
+    /// Primary has `sync_commit=on` but no sync replicas - writes are blocked.
+    WritesBlocked,
     /// No primary found in the cluster.
     NoPrimary,
     /// Multiple nodes return `pg_is_in_recovery()` = false.
     SplitBrain,
-    /// Primary has `sync_commit=on` but no sync replicas - writes are blocked.
-    WritesBlocked,
-    /// Primary has `sync_commit=off` with no replicas - DR mode, no redundancy.
-    WritesUnprotected,
-    /// Archive command has never succeeded since becoming primary.
-    ArchiveFailure,
-    /// Archiving is not enabled.
-    ArchivingDisabled,
-    /// Filesystem-level errors found in dmesg.
-    FilesystemErrors,
-
-    // Unknown reasons
-    /// Cannot connect to any nodes in the cluster.
-    NoNodesReachable,
-    /// Cluster has unexpected topology (e.g., more than 3 nodes).
-    UnexpectedTopology,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -974,6 +977,105 @@ mod cluster_state_tests {
             ),
             "expected Critical WritesUnprotected, got {actual:?}"
         );
+    }
+
+    #[test]
+    fn test_critical_archive_failure_and_writes_blocked_no_streaming() {
+        // Scenario captured from prod machine where:
+        // - Primary db003 (failover node) has archive_mode=on but archiving has
+        //   never succeeded (archived_count=0, failed_count=237).
+        // - synchronous_commit=remote_apply, synchronous_standby_names is set
+        //   (non-empty) — sync replication is configured.
+        // - pg_stat_replication is empty (no streaming replicas connected).
+        // - Both replicas are reachable but report wal_receiver=None.
+        //
+        // Two Critical conditions coexist: ArchiveFailure (durability broken)
+        // and WritesBlocked (writers hang waiting for an ack that won't come).
+        // Customer-visible write hang outranks archive failure → headline
+        // Reason should be WritesBlocked. The ArchiveFailure node verdict
+        // must still be present so the operator sees both findings.
+        let mut config = HashMap::new();
+        config.insert("synchronous_commit".to_owned(), "remote_apply".to_owned());
+        config.insert(
+            "synchronous_standby_names".to_owned(),
+            "ANY 1 ( prod_pg_db001, prod_pg_db002 )".to_owned(),
+        );
+        config.insert("archive_mode".to_owned(), "on".to_owned());
+        config.insert(
+            "archive_command".to_owned(),
+            "/usr/bin/pgbackrest --stanza=prod-pg archive-push %p".to_owned(),
+        );
+
+        let archiver = ArchiverStats {
+            archived_count: 0,
+            failed_count: 237,
+            last_archived_wal: None,
+            last_archived_time: None,
+            last_failed_wal: Some("0000000B000003C0000000FC".to_owned()),
+            last_failed_time: None,
+        };
+
+        let primary_health = PrimaryHealthBuilder::new()
+            .with_replication(0)
+            .with_config(config)
+            .with_archiver(archiver)
+            .build();
+
+        let disconnected_replica = ReplicaHealthBuilder::new().without_wal_receiver().build();
+
+        let cluster = make_cluster(vec![
+            make_node(
+                1,
+                "prod-pg-db001.sto2.example.com",
+                Role::Replica {
+                    health: Box::new(disconnected_replica.clone()),
+                },
+            ),
+            make_node(
+                2,
+                "prod-pg-db002.sto3.example.com",
+                Role::Replica {
+                    health: Box::new(disconnected_replica),
+                },
+            ),
+            make_node(
+                3,
+                "prod-pg-db003.sto1.example.com",
+                Role::Primary {
+                    health: Box::new(primary_health),
+                },
+            ),
+        ]);
+
+        let actual = classify::classify(analyze(cluster, HashMap::new()));
+
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Critical {
+                    reason: Reason::WritesBlocked,
+                    ..
+                }
+            ),
+            "expected Critical WritesBlocked, got {actual:?}"
+        );
+
+        let verdict = &actual.cluster().verdict;
+
+        assert_eq!(
+            verdict.cluster_verdict(),
+            Some(&ClusterVerdict::WritesBlocked),
+        );
+
+        #[expect(clippy::wildcard_enum_match_arm, reason = "it's a test")]
+        let archive = verdict.node_verdicts().iter().find_map(|(_, v)| match v {
+            NodeVerdict::ArchiveFailure {
+                failed_count,
+                last_wal,
+            } => Some((*failed_count, last_wal.as_deref())),
+            _ => None,
+        });
+        assert_eq!(archive, Some((237, Some("0000000B000003C0000000FC"))));
     }
 
     #[test]

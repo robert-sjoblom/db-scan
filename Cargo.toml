@@ -267,3 +267,4 @@ serde_yaml = "0.9.34"
 pretty_assertions = "1.4.1"
 rstest = "0.26.1"
 rvcr = { git = "https://github.com/robert-sjoblom/rvcr", tag = "v4" }
+strum = { version = "0.28.0", features = ["derive"] }
