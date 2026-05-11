@@ -2,7 +2,7 @@
 
 A PostgreSQL cluster health monitoring tool that scans, analyzes, and reports on the health status of PostgreSQL clusters with streaming replication.
 
-This is a project that's tightly coupled to the our current setup, so it's probably mostly useless to outsides. That said, it's open source so do with it what thou wilst.
+This is a project that's tightly coupled to our current setup, so it's probably mostly useless to outsiders. That said, it's open source so do with it what thou wilst.
 
 Large parts of this readme (but not the code) was AI-summarized. Tread carefully.
 
@@ -152,6 +152,9 @@ display:
 
 disk_check:
   window_minutes: 60
+
+scan:
+  max_concurrency: 256
 ```
 
 All fields are optional. CLI flags and environment variables take precedence over the config file. `PGPASSWORD` is never read from the config file.
@@ -173,6 +176,8 @@ export RUST_LOG="info"  # or debug, trace, warn, error
 db-scan [OPTIONS]
 
 Options:
+  --config <PATH>                          Path to config file [default: $XDG_CONFIG_HOME/db-scan/config.yml]
+  --no-config                              Skip loading the config file
   --pguser <PGUSER>                        PostgreSQL username
   --pgpassword <PGPASSWORD>                PostgreSQL password
   --pgsslkey <PGSSLKEY>                    Path to SSL key file
@@ -189,6 +194,7 @@ Options:
   --check-disks                            Enable disk health checks via SSH on nodes
   --ssh-user <SSH_USER>                    SSH user for disk checks (e.g. "first_last") [env: SSH_USER]
   --disk-check-window-minutes <MINUTES>    dmesg recency window for disk checks [default: 60] [env: DISK_CHECK_WINDOW_MINUTES]
+  --max-concurrency <N>                    Max nodes scanned in parallel [default: 256] [env: DB_SCAN_MAX_CONCURRENCY]
   --default-user <USER>                    Default PostgreSQL user for non-cert auth [env: DEFAULT_USER]
   --default-pass <PASS>                    Default PostgreSQL password for non-cert auth [env: DEFAULT_PASS]
   -h, --help                               Print help
@@ -228,14 +234,30 @@ db-scan --log-level debug
 
 ### Output Format
 
-Terminal output shows cluster health in a table format:
+Terminal output prints a stage-timings block followed by a cluster health table:
 
 ```
-STATUS    CLUSTER           PRIMARY    REPLICAS      LAG     REASON
-CRITICAL  prod-pg-app007    db001      -             -       NoPrimary
-DEGRADED  dev-pg-app001     db001      db002,db003   50MB    HighReplicationLag
-HEALTHY   prod-pg-app123    db002      db001,db003   0B      Failover
+Prometheus       124 ms
+Node Discovery     0 ms
+Scan             424 ms
+Clustering       454 ms
+Analysis         454 ms
+Output           454 ms
+────────────────────────
+Total           1.91 s
+STATUS   CLUSTER        PRIMARY                    REPLICAS              LAG DISK REASON
+HEALTHY  dev-pg-app001  db001@sto1                 db002,db003           -   -    -
+CRITICAL prod-pg-app123 db001@sto1⁷ vs db002@sto2⁸ db003@sto3→db001@sto1 -   -    SplitBrain: replica overrides timeline (7 < 8)
+
+⁷ = timeline id
 ```
+
+Notes on the format:
+- `PRIMARY` and replica cells include the node's zone (`@sto1`).
+- A chained replica shows its upstream: `db003@sto3→db001@sto1`.
+- When split-brain is detected, the primary cell lists candidates side-by-side with superscript timeline markers; footnote keys appear below the table.
+- `LAG` shows `-` when not applicable (no replica or no measurement), otherwise a byte count (e.g. `80MB`).
+- `DISK` is only populated when `--check-disks` is enabled.
 
 ## Health States
 
@@ -270,7 +292,7 @@ HEALTHY   prod-pg-app123    db002      db001,db003   0B      Failover
 1. **Scanner** (`v2/scan/`): Connects to PostgreSQL nodes and executes health checks
 2. **Cluster Builder** (`v2/cluster.rs`): Groups nodes into clusters
 3. **Analyzer** (`v2/analyze/`): Evaluates cluster health and detects issues
-4. **Writer** (`v2/writer.rs`): Formats and outputs results
+4. **Writer** (`v2/writer/`): Formats and outputs results (terminal, CSV)
 
 ### Data Flow
 
@@ -300,20 +322,37 @@ cargo test
 ```
 src/
 ├── main.rs                    # Entry point
+├── config.rs                  # CLI + config file merge
 ├── database_portal.rs         # Node API client
 ├── logging.rs                 # Tracing setup
+├── pipeline.rs                # Scan → analyze → write orchestration
+├── timings.rs                 # Stage timing instrumentation
+├── prometheus.rs              # Prometheus client (optional feature)
+├── prometheus/
+│   └── models.rs
 └── v2/
-    ├── mod.rs
     ├── node.rs                # Node data structure
-    ├── db.rs                  # Database connection
     ├── cluster.rs             # Cluster builder
-    ├── writer.rs              # Output formatting
+    ├── db.rs                  # Database connection
+    ├── db/
+    │   └── db_error.rs        # Database error taxonomy
+    ├── scan.rs                # Scan orchestration
     ├── scan/
-    │   ├── mod.rs             # Scan orchestration
     │   ├── health_check_primary.rs
-    │   └── health_check_replica.rs
-    └── analyze/
-        └── mod.rs             # Health analysis logic
+    │   ├── health_check_replica.rs
+    │   └── disk_check.rs      # SSH/dmesg disk checks
+    ├── analyze.rs             # Health analysis entry point
+    ├── analyze/
+    │   ├── checks.rs          # Individual health checks
+    │   ├── classify.rs        # Verdict classification
+    │   └── split_brain.rs     # Split-brain resolution
+    ├── writer.rs              # Output dispatch
+    └── writer/
+        ├── build.rs           # Build view rows from cluster state
+        ├── view.rs            # Row/view data types
+        ├── terminal.rs        # Terminal renderer
+        ├── csv.rs             # CSV renderer
+        └── units.rs           # Byte/duration formatting
 ```
 
 ## Logging
