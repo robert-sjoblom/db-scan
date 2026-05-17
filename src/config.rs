@@ -36,6 +36,7 @@ pub(crate) struct DbScanConfig {
     pub(crate) check_disks: bool,
     pub(crate) disk_check_window_minutes: u64,
     pub(crate) max_concurrency: usize,
+    pub(crate) database_portal_url: String,
 }
 
 /// A tool to scan `PostgreSQL` clusters for configuration and health.
@@ -132,15 +133,6 @@ pub(crate) struct CliArgs {
     pub(crate) max_concurrency: Option<usize>,
 }
 
-impl DbScanConfig {
-    pub(crate) fn cluster_pattern(&self) -> String {
-        self.cluster.as_ref().map_or_else(
-            || ".*-(pg|ts)-.*".to_owned(),
-            |r| format!(".*{}.*", r.as_str()),
-        )
-    }
-}
-
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
@@ -156,6 +148,14 @@ struct FileConfig {
     disk_check: DiskCheckFile,
     #[serde(default)]
     scan: ScanFile,
+    #[serde(default)]
+    database_portal: DatabasePortalFile,
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
+struct DatabasePortalFile {
+    url: Option<String>,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -274,6 +274,10 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         .or(file.scan.max_concurrency)
         .unwrap_or(256)
         .max(1);
+    let database_portal_url = file
+        .database_portal
+        .url
+        .ok_or_else(|| anyhow!("database_portal.url not set in config"))?;
 
     Ok(DbScanConfig {
         pguser,
@@ -295,5 +299,6 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         check_disks: cli.check_disks,
         disk_check_window_minutes,
         max_concurrency,
+        database_portal_url,
     })
 }

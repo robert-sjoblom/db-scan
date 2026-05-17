@@ -2,14 +2,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
 
-use crate::v2::node::Node;
+use crate::{config::get_config, v2::node::Node};
 
 const ONE_DAY_IN_SECONDS: u64 = 86_400;
 const CACHE_PATH: &str = "/tmp/nodes_response.json";
-const DATABASE_PORTAL_URL: &str = match option_env!("DATABASE_PORTAL_URL") {
-    Some(url) => url,
-    None => "https://database.example.com/api/v1/nodes",
-};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct NodesResponse {
@@ -50,13 +46,10 @@ pub(crate) async fn nodes() -> Result<Vec<Node>, DbPortalErrors> {
         return Ok(parse_nodes(nodes_response.items));
     }
 
-    tracing::info!(
-        source = "api",
-        url = DATABASE_PORTAL_URL,
-        "fetching nodes from API"
-    );
+    let url = &get_config().database_portal_url;
+    tracing::info!(source = "api", url = %url, "fetching nodes from API");
     let client = reqwest::Client::new();
-    let response = client.get(DATABASE_PORTAL_URL).send().await?;
+    let response = client.get(url).send().await?;
 
     let nodes_response: NodesResponse = response.json().await?;
 

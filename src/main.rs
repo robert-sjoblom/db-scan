@@ -1,17 +1,15 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use error_stack::Report;
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::instrument;
 
 use crate::{
     config::{CONFIG, get_config},
     pipeline::{Pipeline, PipelineContext, PipelineError},
-    prometheus::FileSystemMetrics,
     timings::{Event, Stage},
     v2::{
         analyze::analyze_clusters,
@@ -26,7 +24,6 @@ mod config;
 mod database_portal;
 mod logging;
 mod pipeline;
-mod prometheus;
 mod timings;
 mod v2;
 
@@ -76,9 +73,8 @@ async fn run_single_scan(writer_options: Arc<WriterOptions>) {
 
     let (timings_tx, timings_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     let timings_handle = tokio::spawn(timings::reporter(timings_rx));
-    let batch_data = batch_filesystem_data(timings_tx.clone()).await;
 
-    let result = run_scan(&timings_tx, batch_data, writer_options, None).await;
+    let result = run_scan(&timings_tx, writer_options, None).await;
 
     let _ = timings_tx.send(Event::Complete);
     drop(timings_tx);
@@ -110,11 +106,9 @@ async fn run_watch_mode(writer_options: Arc<WriterOptions>, interval: Duration) 
 
         // Timings are intentionally discarded in watch mode (screen is cleared anyway)
         let (timings_tx, _) = tokio::sync::mpsc::unbounded_channel::<Event>();
-        let batch_data = batch_filesystem_data(timings_tx.clone()).await;
 
         let result = run_scan(
             &timings_tx,
-            batch_data,
             Arc::clone(&writer_options),
             cluster_filter.as_ref(),
         )
@@ -160,11 +154,10 @@ async fn run_watch_mode(writer_options: Arc<WriterOptions>, interval: Duration) 
 
 async fn run_scan(
     timings_tx: &UnboundedSender<Event>,
-    batch_data: HashMap<String, FileSystemMetrics>,
     writer_options: Arc<WriterOptions>,
     cluster_filter: Option<&HashSet<String>>,
 ) -> Result<ScanResult, Report<PipelineError>> {
-    let pipeline_ctx = PipelineContext::new(timings_tx.clone(), batch_data, writer_options);
+    let pipeline_ctx = PipelineContext::new(timings_tx.clone(), writer_options);
 
     // Clone filter for the spawned task (needs 'static)
     let filter = cluster_filter.cloned();
@@ -185,26 +178,6 @@ async fn run_scan(
         .sink(Stage::Write, |ctx, rx| write_results(Arc::clone(&ctx), rx))
         .run()
         .await
-}
-
-#[instrument(level = "debug")]
-async fn batch_filesystem_data(
-    timings_tx: UnboundedSender<Event>,
-) -> HashMap<String, FileSystemMetrics> {
-    let _ = timings_tx.send(Event::Start(Stage::Prometheus));
-
-    let data = prometheus::client::get_batch_filesystem_data(get_config().cluster_pattern()).await;
-
-    if data.is_empty() {
-        tracing::warn!("no prometheus metrics fetched, backup progress will be unavailable");
-    } else {
-        tracing::info!(
-            metric_count = data.len(),
-            "fetched prometheus filesystem metrics"
-        );
-    }
-    let _ = timings_tx.send(Event::End(Stage::Prometheus));
-    data
 }
 
 async fn filter_nodes(

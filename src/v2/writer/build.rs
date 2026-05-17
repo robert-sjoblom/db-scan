@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::v2::{
     analyze::{
@@ -10,9 +10,8 @@ use crate::v2::{
     },
 };
 
-use super::{
-    units::{format_bytes, parse_lag_to_bytes},
-    view::{ClusterView, NodeView, PrimaryView, ReasonView, ReplicaView, ReplicasView, Status},
+use super::view::{
+    ClusterView, NodeView, PrimaryView, ReasonView, ReplicaView, ReplicasView, Status,
 };
 
 pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
@@ -20,12 +19,8 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
         ClusterHealth::Healthy { failover, cluster } => {
             let show_tl = timelines_differ(&cluster.cluster.nodes);
             let primary = build_primary_view(cluster, show_tl);
-            let replicas = build_replicas_view(
-                cluster.cluster.primary(),
-                &cluster.backup_progress,
-                &cluster.cluster.nodes,
-                show_tl,
-            );
+            let replicas =
+                build_replicas_view(cluster.cluster.primary(), &cluster.cluster.nodes, show_tl);
             ClusterView {
                 status: Status::Healthy,
                 name: cluster.name().to_owned(),
@@ -51,12 +46,8 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
         } => {
             let show_tl = timelines_differ(&cluster.cluster.nodes);
             let primary = build_primary_view(cluster, show_tl);
-            let replicas = build_replicas_view(
-                cluster.cluster.primary(),
-                &cluster.backup_progress,
-                &cluster.cluster.nodes,
-                show_tl,
-            );
+            let replicas =
+                build_replicas_view(cluster.cluster.primary(), &cluster.cluster.nodes, show_tl);
             let reason_view = build_reason_view(reason, &cluster.verdict);
             let disk = extract_disk_info(cluster);
             let failover = cluster.verdict.has_failover();
@@ -137,7 +128,6 @@ fn build_primary_view(cluster: &AnalyzedCluster, show_tl: bool) -> PrimaryView {
 
 fn build_replicas_view(
     primary: Option<&AnalyzedNode>,
-    backup_progress: &HashMap<String, u16>,
     nodes: &[AnalyzedNode],
     show_tl: bool,
 ) -> ReplicasView {
@@ -159,14 +149,12 @@ fn build_replicas_view(
             } else {
                 None
             };
-            let backup_lag = compute_backup_lag_display(&app_name, &conns, backup_progress);
             ReplicaView {
                 node: NodeView {
                     display: normalized,
                     timeline: tl,
                 },
                 conn_count: conns.len(),
-                backup_lag,
             }
         })
         .collect();
@@ -238,12 +226,8 @@ fn build_primary_replicas_for_critical(
         | Reason::FilesystemErrors => {
             let show_tl = timelines_differ(&cluster.cluster.nodes);
             let primary = build_primary_view(cluster, show_tl);
-            let replicas = build_replicas_view(
-                cluster.cluster.primary(),
-                &cluster.backup_progress,
-                &cluster.cluster.nodes,
-                show_tl,
-            );
+            let replicas =
+                build_replicas_view(cluster.cluster.primary(), &cluster.cluster.nodes, show_tl);
             (primary, replicas)
         }
     }
@@ -656,36 +640,4 @@ fn group_connections_by_identity(
         grouped.entry(key).or_default().push(conn);
     }
     grouped
-}
-
-fn compute_backup_lag_display(
-    app_name: &str,
-    conns: &[&ReplicationConnection],
-    backup_progress: &HashMap<String, u16>,
-) -> Option<String> {
-    const BACKUP_APPS: &[&str] = &["pg_basebackup", "pg_dump", "pg_dumpall"];
-
-    if !BACKUP_APPS.contains(&app_name) {
-        return None;
-    }
-
-    let progress_from_prometheus = conns
-        .iter()
-        .filter_map(|c| {
-            let addr = c.client_addr.as_ref()?;
-            backup_progress.get(addr)
-        })
-        .max();
-
-    if let Some(&progress_pct_100) = progress_from_prometheus {
-        let pct = f64::from(progress_pct_100) / 100.0;
-        return Some(format!(" ~{:.1}%", pct));
-    }
-
-    conns
-        .iter()
-        .filter_map(|c| c.replay_lag.as_deref())
-        .filter_map(parse_lag_to_bytes)
-        .max()
-        .map(|lag| format!(" ~{} behind", format_bytes(lag)))
 }
