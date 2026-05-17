@@ -258,9 +258,10 @@ tokio-postgres = { version = "0.7.13", features = ["with-chrono-0_4"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 serde_yaml = "0.9.34"
+self_update = { version = "0.44", features = ["archive-tar", "compression-flate2"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
 rstest = "0.26.1"
-rvcr = { git = "https://github.com/robert-sjoblom/rvcr", tag = "v4" }
+rvcr = { git = "https://github.com/robert-sjoblom/rvcr", rev = "74e1a3852d147d486a8180aa325f910ab2adfefb" }
 strum = { version = "0.28.0", features = ["derive"] }

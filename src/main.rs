@@ -25,14 +25,22 @@ mod database_portal;
 mod logging;
 mod pipeline;
 mod timings;
+mod updater;
 mod v2;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Install rustls default crypto provider");
 
+    // Self-update fast path: bypass config validation (which requires PGPASSWORD etc).
+    if std::env::args().nth(1).as_deref() == Some("self-update") {
+        if let Err(e) = updater::update() {
+            eprintln!("self-update failed: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let args = match config::load() {
         Ok(c) => c,
         Err(e) => {
@@ -40,7 +48,11 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    run(args);
+}
 
+#[tokio::main]
+async fn run(args: config::DbScanConfig) {
     if !args.silence_tracing {
         logging::setup(args.log_level.clone());
     }
@@ -65,6 +77,13 @@ async fn main() {
     let watch_interval = args.watch.map(Duration::from_secs);
 
     CONFIG.set(args).unwrap();
+
+    // Best-effort version check; capped so a slow/unreachable GitHub doesn't stall scans.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(updater::nag_if_outdated),
+    )
+    .await;
 
     match watch_interval {
         Some(interval) => run_watch_mode(writer_options, interval).await,
