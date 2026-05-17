@@ -112,11 +112,7 @@
             "pg_version": "15.14",
             "ip_address": "127.3.12.161",
             "role": "unknown",
-            "errors": [
-                {
-                    "Postgres": "error connecting to server: connection timed out"
-                }
-            ]
+            "errors": ["ConnectionTimeout"]
         }
     ]
 }

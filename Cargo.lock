@@ -469,7 +469,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "error-stack",
  "futures",
  "openssh",
  "pretty_assertions",
@@ -486,7 +485,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "strum",
- "thiserror",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
@@ -640,16 +638,6 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "error-stack"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99a1a66f27cc1b82d6b8c2d24b3b1e90e6e67004a448081bbe58bd537f72a7c8"
-dependencies = [
- "anyhow",
- "rustc_version",
 ]
 
 [[package]]

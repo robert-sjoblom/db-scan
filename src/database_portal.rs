@@ -1,8 +1,8 @@
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use tracing::instrument;
 
-use crate::{config::get_config, v2::node::Node};
+use crate::{config::get_config, errors, v2::node::Node};
 
 const ONE_DAY_IN_SECONDS: u64 = 86_400;
 const CACHE_PATH: &str = "/tmp/nodes_response.json";
@@ -27,7 +27,7 @@ fn parse_nodes(items: Vec<serde_json::Value>) -> Vec<Node> {
 }
 
 #[instrument(skip_all, level = "INFO")]
-pub(crate) async fn nodes() -> Result<Vec<Node>, DbPortalErrors> {
+pub(crate) async fn nodes() -> anyhow::Result<Vec<Node>> {
     // Check if cache exists and is less than 1 day old
     let use_cache = std::fs::metadata(CACHE_PATH)
         .ok()
@@ -37,7 +37,10 @@ pub(crate) async fn nodes() -> Result<Vec<Node>, DbPortalErrors> {
 
     if use_cache && let Ok(json) = std::fs::read_to_string(CACHE_PATH) {
         tracing::info!(source = "file", "reading nodes from cache");
-        let nodes_response: NodesResponse = serde_json::from_str(&json)?;
+        let nodes_response: NodesResponse = serde_json::from_str(&json)
+            .map_err(errors::serde_err)
+            .with_context(|| format!("cache_path: {CACHE_PATH}"))
+            .context("attempting: deserialize cached nodes response")?;
         tracing::info!(
             node_count = nodes_response.count,
             source = "file",
@@ -49,13 +52,26 @@ pub(crate) async fn nodes() -> Result<Vec<Node>, DbPortalErrors> {
     let url = &get_config().database_portal_url;
     tracing::info!(source = "api", url = %url, "fetching nodes from API");
     let client = reqwest::Client::new();
-    let response = client.get(url).send().await?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("url: {url}"))
+        .context("attempting: GET database portal API")?;
 
-    let nodes_response: NodesResponse = response.json().await?;
+    let nodes_response: NodesResponse = response
+        .json()
+        .await
+        .with_context(|| format!("url: {url}"))
+        .context("attempting: deserialize database portal response body")?;
 
     // Write the response to a json file in /tmp
-    let json = serde_json::to_string(&nodes_response)?;
-    std::fs::write(CACHE_PATH, &json)?;
+    let json = serde_json::to_string(&nodes_response)
+        .map_err(errors::serde_err)
+        .context("attempting: serialize nodes response for cache")?;
+    std::fs::write(CACHE_PATH, &json)
+        .with_context(|| format!("cache_path: {CACHE_PATH}"))
+        .context("attempting: write nodes cache file")?;
     tracing::info!(file = CACHE_PATH, "cached nodes to file");
 
     tracing::info!(
@@ -64,14 +80,4 @@ pub(crate) async fn nodes() -> Result<Vec<Node>, DbPortalErrors> {
         "fetched nodes from API"
     );
     Ok(parse_nodes(nodes_response.items))
-}
-
-#[derive(Error, Debug)]
-pub enum DbPortalErrors {
-    #[error("HTTP request failed: {0}")]
-    Reqwest(#[from] reqwest::Error),
-    #[error("JSON serialization/deserialization failed: {0}")]
-    Serde(#[from] serde_json::Error),
-    #[error("IO operation failed: {0}")]
-    Io(#[from] std::io::Error),
 }

@@ -6,10 +6,14 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_postgres::Client;
 use tracing::instrument;
 
-use crate::v2::{
-    db::db_error::DbError,
-    node::Node,
-    scan::{AnalyzedNode, Role},
+use anyhow::Context as _;
+
+use crate::{
+    errors,
+    v2::{
+        node::Node,
+        scan::{AnalyzedNode, Role},
+    },
 };
 
 /// Per-replica WAL sender state from `pg_stat_replication.state`.
@@ -236,8 +240,9 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
                 disk_check: None,
             }
         }
-        Err(e) => {
-            tracing::error!(error = %e, "primary health check failed");
+        Err(err) => {
+            let kind = errors::extract_kind(&err);
+            tracing::error!(error = ?err, "primary health check failed");
 
             AnalyzedNode {
                 id: node.id,
@@ -246,7 +251,7 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
                 pg_version: node.pg_version.clone(),
                 ip_address: node.ip_address,
                 role: Role::UnknownPrimary,
-                errors: vec![e],
+                errors: vec![kind],
                 disk_check: None,
             }
         }
@@ -263,25 +268,30 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
 }
 
 #[instrument(skip(client), level = "trace")]
-async fn execute_primary_health_check(
-    client: &Client,
-) -> Result<PrimaryHealthCheckResult, DbError> {
+async fn execute_primary_health_check(client: &Client) -> anyhow::Result<PrimaryHealthCheckResult> {
     tracing::debug!("executing primary health check query");
 
-    let row = client.query_one(HEALTH_CHECK_PRIMARY_QUERY, &[]).await?;
+    let row = client
+        .query_one(HEALTH_CHECK_PRIMARY_QUERY, &[])
+        .await
+        .map_err(errors::pg_err)
+        .context("attempting: primary health check query")?;
 
     tracing::debug!(row = ?row, "primary health check query executed");
 
-    // Get JSONB as text and parse it
     let json_text: String = row.get(0);
 
     tracing::debug!(text = %json_text, "Raw JSONB text result");
 
-    let json_value: serde_json::Value = serde_json::from_str(&json_text)?;
+    let json_value: serde_json::Value = serde_json::from_str(&json_text)
+        .map_err(errors::serde_err)
+        .context("attempting: parse health-check JSONB as JSON value")?;
 
     tracing::trace!(json = %json_value, "Raw JSONB result");
 
-    Ok(serde_json::from_value(json_value)?)
+    serde_json::from_value(json_value)
+        .map_err(errors::serde_err)
+        .context("attempting: deserialize PrimaryHealthCheckResult")
 }
 
 #[cfg(test)]

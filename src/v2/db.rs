@@ -10,15 +10,15 @@ use tokio_postgres::{Client, Config, Connection, Socket, config::SslMode, tls::M
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::instrument;
 
-use crate::{CONFIG, config::DbScanConfig, v2::db::db_error::DbError, v2::node::Node};
+use anyhow::Context as _;
 
-pub mod db_error;
+use crate::{CONFIG, config::DbScanConfig, errors, v2::node::Node};
 
 static CONNECTOR: OnceLock<MakeRustlsConnect> = OnceLock::new();
 static INSECURE_CONNECTOR: OnceLock<MakeRustlsConnect> = OnceLock::new();
 type PgConnection = Connection<Socket, <MakeRustlsConnect as MakeTlsConnect<Socket>>::Stream>;
 
-pub async fn connect(node: &Node) -> Result<(Client, PgConnection), DbError> {
+pub async fn connect(node: &Node) -> anyhow::Result<(Client, PgConnection)> {
     tracing::trace!(node_name = %node.name, node_id = node.id, "connecting to node");
     let cfg = pg_cfg(node);
     let connector = if node.requires_cert() {
@@ -27,7 +27,12 @@ pub async fn connect(node: &Node) -> Result<(Client, PgConnection), DbError> {
         insecure_connector()
     };
 
-    let (client, conn) = cfg.connect(connector.clone()).await?;
+    let (client, conn) = cfg
+        .connect(connector.clone())
+        .await
+        .map_err(errors::pg_err)
+        .with_context(|| format!("requires_cert: {}", node.requires_cert()))
+        .context("attempting: postgres connect")?;
     Ok((client, conn))
 }
 
