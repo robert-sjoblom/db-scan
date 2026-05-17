@@ -258,7 +258,7 @@ tokio-postgres = { version = "0.7.13", features = ["with-chrono-0_4"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 serde_yaml = "0.9.34"
-self_update = { version = "0.44", features = ["archive-tar", "compression-flate2"] }
+self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls", "archive-tar", "compression-flate2"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
