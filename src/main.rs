@@ -29,6 +29,10 @@ mod v2;
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Install rustls default crypto provider");
+
     let args = match config::load() {
         Ok(c) => c,
         Err(e) => {
