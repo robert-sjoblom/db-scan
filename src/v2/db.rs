@@ -1,16 +1,22 @@
-use std::{fs, sync::OnceLock, time::Duration};
+use std::{fs, io::BufReader, sync::Arc, sync::OnceLock, time::Duration};
 
-use native_tls::{Certificate, Identity, TlsConnector};
-use postgres_native_tls::MakeTlsConnector;
-use tokio_postgres::{Client, Config, Connection, Socket, config::SslMode};
+use rustls::{
+    ClientConfig, RootCertStore, SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::{CryptoProvider, ring},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+};
+use tokio_postgres::{Client, Config, Connection, Socket, config::SslMode, tls::MakeTlsConnect};
+use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::instrument;
 
 use crate::{CONFIG, config::DbScanConfig, v2::db::db_error::DbError, v2::node::Node};
 
 pub mod db_error;
 
-static CONNECTOR: OnceLock<MakeTlsConnector> = OnceLock::new();
-type PgConnection = Connection<Socket, postgres_native_tls::TlsStream<Socket>>;
+static CONNECTOR: OnceLock<MakeRustlsConnect> = OnceLock::new();
+static INSECURE_CONNECTOR: OnceLock<MakeRustlsConnect> = OnceLock::new();
+type PgConnection = Connection<Socket, <MakeRustlsConnect as MakeTlsConnect<Socket>>::Stream>;
 
 pub async fn connect(node: &Node) -> Result<(Client, PgConnection), DbError> {
     tracing::trace!(node_name = %node.name, node_id = node.id, "connecting to node");
@@ -18,11 +24,7 @@ pub async fn connect(node: &Node) -> Result<(Client, PgConnection), DbError> {
     let connector = if node.requires_cert() {
         connector()
     } else {
-        &MakeTlsConnector::new(
-            TlsConnector::builder()
-                .danger_accept_invalid_certs(true)
-                .build()?,
-        )
+        insecure_connector()
     };
 
     let (client, conn) = cfg.connect(connector.clone()).await?;
@@ -53,31 +55,99 @@ fn pg_cfg(node: &Node) -> Config {
 }
 
 #[instrument(skip_all, level = "TRACE")]
-pub fn connector() -> &'static MakeTlsConnector {
+pub fn connector() -> &'static MakeRustlsConnect {
     tracing::trace!("getting TLS connector");
     CONNECTOR.get().expect("Connector initialized")
+}
+
+fn insecure_connector() -> &'static MakeRustlsConnect {
+    INSECURE_CONNECTOR.get_or_init(|| {
+        let config = ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("Build TLS protocol versions")
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(
+                NoCertVerification(ring::default_provider()),
+            ))
+            .with_no_client_auth();
+        MakeRustlsConnect::new(config)
+    })
 }
 
 pub fn setup(cfg: &DbScanConfig) {
     tracing::info!("setting up TLS connector");
     CONNECTOR.get_or_init(|| {
-        let identity = Identity::from_pkcs8(
-            &fs::read(&cfg.pgsslcert).expect("SSL cert exists"),
-            &fs::read(&cfg.pgsslkey).expect("SSL key exists"),
-        )
-        .unwrap();
+        let provider = Arc::new(ring::default_provider());
 
-        let ca_cert =
-            Certificate::from_pem(&fs::read(&cfg.pgsslrootcert).expect("SSL root cert exists"))
-                .unwrap();
+        let cert_pem = fs::read(&cfg.pgsslcert).expect("SSL cert exists");
+        let key_pem = fs::read(&cfg.pgsslkey).expect("SSL key exists");
+        let ca_pem = fs::read(&cfg.pgsslrootcert).expect("SSL root cert exists");
 
-        let connector = TlsConnector::builder()
-            .add_root_certificate(ca_cert)
-            .identity(identity)
-            .build()
-            .expect("Build TLS connector");
+        let cert_chain: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut BufReader::new(&*cert_pem))
+                .collect::<Result<_, _>>()
+                .expect("Parse client cert PEM");
 
-        postgres_native_tls::MakeTlsConnector::new(connector)
+        let key: PrivateKeyDer<'static> =
+            rustls_pemfile::private_key(&mut BufReader::new(&*key_pem))
+                .expect("Parse client key PEM")
+                .expect("Client key present");
+
+        let mut roots = RootCertStore::empty();
+        let ca_certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut BufReader::new(&*ca_pem))
+                .collect::<Result<_, _>>()
+                .expect("Parse root CA PEM");
+        for ca in ca_certs {
+            roots.add(ca).expect("Add root CA");
+        }
+
+        let config = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("Build TLS protocol versions")
+            .with_root_certificates(roots)
+            .with_client_auth_cert(cert_chain, key)
+            .expect("Build TLS client config");
+
+        MakeRustlsConnect::new(config)
     });
     tracing::info!("TLS connector set up");
+}
+
+#[derive(Debug)]
+struct NoCertVerification(CryptoProvider);
+
+impl ServerCertVerifier for NoCertVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
 }

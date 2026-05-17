@@ -16,8 +16,8 @@ pub enum DbError {
     SerdeJson(String),
 }
 
-impl From<native_tls::Error> for DbError {
-    fn from(err: native_tls::Error) -> Self {
+impl From<rustls::Error> for DbError {
+    fn from(err: rustls::Error) -> Self {
         DbError::TlsConnector(err.to_string())
     }
 }
