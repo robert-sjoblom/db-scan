@@ -519,17 +519,12 @@ pub async fn connect(node: &Node) -> error_stack::Result<Client, DbError> {
    - Could be `UnknownPrimary(DbErrorKind)` to preserve why health check failed
    - Tradeoff: More memory, but better debuggability
 
-2. **How to handle prometheus fetch errors?**
-   - Currently they're just logged
-   - Should they be represented in ClusterHealth::Unknown?
-   - Probably not - prometheus is enrichment, not critical path
-
-3. **Should analyze() return Result?**
+2. **Should analyze() return Result?**
    - Currently it always returns ClusterHealth (never fails)
    - This is probably correct - partial data is still useful
    - Unknown variants capture "couldn't determine" states
 
-4. **Log level for different error kinds?**
+3. **Log level for different error kinds?**
    - Retryable: WARN (transient, expected)
    - Auth failures: ERROR (config issue)
    - Query syntax: FATAL (bug)

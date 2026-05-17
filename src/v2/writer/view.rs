@@ -82,17 +82,16 @@ impl PrimaryView {
 pub(crate) struct ReplicaView {
     pub node: NodeView,
     pub conn_count: usize,
-    pub backup_lag: Option<String>,
 }
 
 impl ReplicaView {
     pub(crate) fn render(&self, mode: RenderMode) -> String {
         let node_str = self.node.render(mode);
-        match (self.conn_count > 1, &self.backup_lag) {
-            (true, Some(lag)) => format!("{}(×{}{})", node_str, self.conn_count, lag),
-            (true, None) => format!("{}(×{})", node_str, self.conn_count),
-            (false, Some(lag)) => format!("{}{}", node_str, lag),
-            (false, None) => node_str,
+
+        if self.conn_count > 1 {
+            format!("{}(×{})", node_str, self.conn_count)
+        } else {
+            node_str
         }
     }
 }

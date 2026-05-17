@@ -8,7 +8,6 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 #[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Ord, Copy, Clone)]
 pub enum Stage {
-    Prometheus,
     DatabasePortal,
     Scan,
     Clustering,
@@ -19,7 +18,6 @@ pub enum Stage {
 impl std::fmt::Display for Stage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            Stage::Prometheus => write!(f, "Prometheus"),
             Stage::DatabasePortal => write!(f, "Node Discovery"),
             Stage::Scan => write!(f, "Scan"),
             Stage::Analyze => write!(f, "Analysis"),
@@ -142,14 +140,14 @@ mod tests {
     #[test]
     fn format_timings_aligns_columns_and_includes_total() {
         let mut durations = HashMap::new();
-        durations.insert(Stage::Prometheus, Duration::from_millis(123));
+        durations.insert(Stage::DatabasePortal, Duration::from_millis(123));
         durations.insert(Stage::Scan, Duration::from_millis(5));
 
         let output = format_timings(&durations).unwrap();
 
         assert_eq!(
             output,
-            "Prometheus       123 ms\n\
+            "Node Discovery   123 ms\n\
              Scan               5 ms\n\
              \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\
              Total            128 ms\n"
@@ -168,27 +166,6 @@ mod tests {
 
         assert!(output.contains("Scan"));
         assert!(output.contains("ms"));
-    }
-
-    #[tokio::test]
-    async fn reporter_outputs_in_declaration_order_not_arrival_order() {
-        let (tx, rx) = mpsc::unbounded_channel();
-
-        // Send in reverse order
-        tx.send(Event::Start(Stage::Write)).unwrap();
-        tx.send(Event::End(Stage::Write)).unwrap();
-        tx.send(Event::Start(Stage::Prometheus)).unwrap();
-        tx.send(Event::End(Stage::Prometheus)).unwrap();
-        tx.send(Event::Complete).unwrap();
-
-        let output = reporter(rx).await.unwrap();
-
-        let prometheus_pos = output.find("Prometheus").unwrap();
-        let output_pos = output.find("Output").unwrap();
-        assert!(
-            prometheus_pos < output_pos,
-            "Prometheus should appear before Output in output"
-        );
     }
 
     #[tokio::test]

@@ -1,9 +1,7 @@
 .PHONY: lint test
 
 lint:
-	cargo clippy
-	cargo clippy --features prometheus -- -D warnings
+	cargo clippy -D warnings
 
 test:
 	cargo test
-	cargo test --features prometheus

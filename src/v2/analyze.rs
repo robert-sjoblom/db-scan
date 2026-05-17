@@ -1,11 +1,10 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::instrument;
 
 use crate::{
     pipeline::PipelineContext,
-    prometheus::FileSystemMetrics,
     v2::{
         analyze::{
             checks::{
@@ -27,7 +26,6 @@ const LAG_THRESHOLD_SECONDS: u64 = 5;
 /// Replication lag threshold in bytes.
 const LAG_THRESHOLD_BYTES: u64 = WAL_GENERATION_RATE_BYTES_PER_SEC * LAG_THRESHOLD_SECONDS;
 
-type Ip = String;
 type NodeName = String;
 
 pub type SplitBrainInfo = crate::v2::analyze::split_brain::SplitBrainInfo;
@@ -40,9 +38,6 @@ mod split_brain;
 #[derive(Debug, Eq, PartialEq)]
 pub struct AnalyzedCluster {
     pub cluster: Cluster,
-    /// Backup progress for `pg_basebackup` connections, mapped by `client_addr`
-    /// Key: client IP address, Value: progress (pct * 100, e.g., 4156 = 41.56%).
-    pub backup_progress: HashMap<String, u16>,
     pub verdict: Verdict,
 }
 
@@ -257,8 +252,7 @@ pub enum ClusterVerdict {
 
 /// Async task that analyzes clusters and sends results through a channel.
 ///
-/// This function receives [`Cluster`] instances from `cluster_rx`, enriches them with
-/// backup progress data (if the prometheus feature is enabled), performs health analysis,
+/// This function receives [`Cluster`] instances from `cluster_rx`, performs health analysis,
 /// and sends the resulting [`ClusterHealth`] through `analyzed_tx`.
 ///
 /// # Arguments
@@ -273,12 +267,13 @@ pub enum ClusterVerdict {
 /// data asynchronously before performing synchronous health analysis.
 #[instrument(skip_all, level = "info")]
 pub async fn analyze_clusters(
-    ctx: Arc<PipelineContext>,
+    _ctx: Arc<PipelineContext>,
     mut cluster_rx: UnboundedReceiver<Cluster>,
     analyzed_tx: UnboundedSender<ClusterHealth>,
 ) {
     while let Some(cluster) = cluster_rx.recv().await {
-        let analyzed = analyze_with_enrichment(cluster, &ctx.batch_data);
+        let analyzed_cluster = analyze(cluster);
+        let analyzed = classify::classify(analyzed_cluster);
 
         match analyzed_tx.send(analyzed) {
             Ok(()) => tracing::trace!("sent analyzed cluster"),
@@ -287,102 +282,7 @@ pub async fn analyze_clusters(
     }
 }
 
-/// Calculates backup progress before analyzing the cluster, allowing us to
-/// test the `analyze` function without setting up file system metrics too.
-fn analyze_with_enrichment(
-    cluster: Cluster,
-    batch_data: &HashMap<Ip, FileSystemMetrics>,
-) -> ClusterHealth {
-    let progress = calculate_backup_progress(&cluster, batch_data);
-    let analyzed_cluster = analyze(cluster, progress);
-    classify::classify(analyzed_cluster)
-}
-
-#[instrument(skip_all, level = "debug", fields(
-    cluster = %cluster.name,
-    batch_data_count = batch_data.len(),
-    replication_connections = tracing::field::Empty,
-    basebackup_count = tracing::field::Empty,
-))]
-/// Calculate backup progress for any `pg_basebackup` connections on the primary
-fn calculate_backup_progress(
-    cluster: &Cluster,
-    batch_data: &HashMap<Ip, FileSystemMetrics>,
-) -> HashMap<String, u16> {
-    let mut progress = HashMap::new();
-
-    let Some(replication_conns) = cluster.primary_replication_info() else {
-        return progress;
-    };
-
-    let span = tracing::Span::current();
-    span.record("replication_connections", replication_conns.len());
-
-    let basebackup_count = replication_conns
-        .iter()
-        .filter(|c| c.application_name == "pg_basebackup")
-        .count();
-    span.record("basebackup_count", basebackup_count);
-
-    tracing::debug!(
-        replication_count = replication_conns.len(),
-        "checking replication connections for pg_basebackup"
-    );
-
-    for conn in replication_conns {
-        if conn.application_name != "pg_basebackup" {
-            continue;
-        }
-
-        tracing::debug!(
-            pid = conn.pid,
-            state = %conn.state,
-            client_addr = ?conn.client_addr,
-            client_hostname = ?conn.client_hostname,
-            "found pg_basebackup connection"
-        );
-
-        let Some(client_addr) = &conn.client_addr else {
-            tracing::warn!(conn = ?conn, "conn has no client_addr");
-            continue;
-        };
-
-        // This is the metrics for the replication/pg_basebackup
-        let Some(conn_metrics) = batch_data.get(client_addr) else {
-            tracing::warn!(
-                client_addr = client_addr,
-                "no file system metric for connection"
-            );
-            continue;
-        };
-
-        let Some(primary) = cluster.primary() else {
-            continue;
-        };
-
-        let Some(primary_metrics) = batch_data.get(&primary.ip_address.to_string()) else {
-            tracing::warn!(
-                primary_conn = primary.ip_address.to_string(),
-                "no file system metric for primary"
-            );
-            continue;
-        };
-
-        tracing::debug!(
-            client_addr = client_addr,
-            used_bytes = conn_metrics.used_bytes,
-            primary_bytes = primary_metrics.size_bytes
-        );
-
-        let progress_pct =
-            estimate_backup_progress(primary_metrics.used_bytes, conn_metrics.used_bytes);
-        progress.insert(client_addr.clone(), progress_pct);
-    }
-
-    progress
-}
-
-fn analyze(cluster: Cluster, backup_progress: HashMap<String, u16>) -> AnalyzedCluster {
+fn analyze(cluster: Cluster) -> AnalyzedCluster {
     let mut verdict = Verdict::default();
 
     let primaries: Vec<_> = cluster.primaries().collect();
@@ -391,43 +291,27 @@ fn analyze(cluster: Cluster, backup_progress: HashMap<String, u16>) -> AnalyzedC
     // No reachable nodes (all Role::Unknown or empty cluster) - Unknown state.
     if primaries.is_empty() && replicas.is_empty() {
         verdict.cluster_verdict = Some(ClusterVerdict::NoNodesReachable);
-        return AnalyzedCluster {
-            cluster,
-            backup_progress,
-            verdict,
-        };
+        return AnalyzedCluster { cluster, verdict };
     }
 
     // Replicas reachable but no primary - Critical.
     if primaries.is_empty() {
         verdict.cluster_verdict = Some(ClusterVerdict::NoPrimary);
-        return AnalyzedCluster {
-            cluster,
-            backup_progress,
-            verdict,
-        };
+        return AnalyzedCluster { cluster, verdict };
     }
 
     // Multiple primaries - Critical (split brain)
     if primaries.len() > 1 {
         let split_brain_info = resolve_split_brain(&primaries, &replicas);
         verdict.cluster_verdict = Some(ClusterVerdict::SplitBrain(split_brain_info));
-        return AnalyzedCluster {
-            cluster,
-            backup_progress,
-            verdict,
-        };
+        return AnalyzedCluster { cluster, verdict };
     }
 
     if replicas.len() > 2 {
         verdict.cluster_verdict = Some(ClusterVerdict::UnexpectedTopology {
             replica_count: replicas.len(),
         });
-        return AnalyzedCluster {
-            cluster,
-            backup_progress,
-            verdict,
-        };
+        return AnalyzedCluster { cluster, verdict };
     }
 
     // At this point we have exactly 1 primary
@@ -448,11 +332,7 @@ fn analyze(cluster: Cluster, backup_progress: HashMap<String, u16>) -> AnalyzedC
         check_unreachable(node, primary, &mut verdict);
     }
 
-    AnalyzedCluster {
-        cluster,
-        backup_progress,
-        verdict,
-    }
+    AnalyzedCluster { cluster, verdict }
 }
 
 /// Extract timeline ID from a primary node.
@@ -463,26 +343,6 @@ fn get_timeline(node: &AnalyzedNode) -> Option<i32> {
         Role::Primary { health } => Some(health.timeline_id),
         Role::Unknown | Role::UnknownPrimary | Role::UnknownReplica | Role::Replica { .. } => None,
     }
-}
-
-/// Estimate `pg_basebackup` progress by comparing primary DB size vs replica filesystem usage
-/// Returns progress as u16 (percentage * 100, e.g., 4156 = 41.56%).
-///
-/// This is a rough estimate assuming the used bytes on the replica are mostly from the backup.
-/// This may be inaccurate if there's other data on the filesystem.
-#[expect(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "it's an estimate, not the math olympiad"
-)]
-fn estimate_backup_progress(primary_used_bytes: u64, replica_used_bytes: u64) -> u16 {
-    if primary_used_bytes == 0 {
-        return 0;
-    }
-
-    let progress = (replica_used_bytes as f64 / primary_used_bytes as f64) * 10000.0;
-    progress.min(10000.0) as u16
 }
 
 #[cfg(test)]
@@ -496,7 +356,7 @@ mod tests {
     fn test_healthy_cluster() {
         let cluster = healthy::non_failover_cluster();
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -513,7 +373,7 @@ mod tests {
     #[test]
     fn test_degraded_cluster_one_replica_down() {
         let cluster = unhealthy::db001_unreachable_failover_with_replica();
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -532,7 +392,7 @@ mod tests {
         // Scenario: db002 is primary (failover occurred), db003 is streaming replica,
         // db001 is online but rebuilding (wal_receiver = None, old last_transaction_replay_at)
         let cluster = unhealthy::db001_rebuilding_after_failover();
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -550,7 +410,7 @@ mod tests {
     fn test_degraded_cluster_chained_replica() {
         // Scenario: db001 is primary, db002 replicates from db001, db003 replicates from db002 (chained)
         let cluster = unhealthy::chained_replica();
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -588,6 +448,8 @@ mod tests {
 
 #[cfg(test)]
 mod cluster_state_tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::v2::{
         cluster::Cluster,
@@ -651,7 +513,7 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -681,7 +543,7 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -721,7 +583,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -762,7 +624,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         // LSN diff: 48F/6957B540 - 48F/6357B540 = 0x06000000 = 100,663,296 bytes (~96MB)
         let ClusterHealth::Degraded {
@@ -802,7 +664,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(&actual, ClusterHealth::Healthy { failover: true, .. }),
@@ -836,7 +698,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(&actual, ClusterHealth::Healthy { failover: true, .. }),
@@ -863,7 +725,7 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -896,7 +758,7 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -928,7 +790,7 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -965,7 +827,7 @@ mod cluster_state_tests {
             make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -1047,7 +909,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -1125,7 +987,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -1189,7 +1051,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -1259,7 +1121,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = classify::classify(analyze(cluster, HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
 
         assert!(
             matches!(
@@ -1309,7 +1171,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let actual = classify::classify(analyze(cluster.clone(), HashMap::new()));
+        let actual = classify::classify(analyze(cluster));
         assert!(
             matches!(
                 actual,
@@ -1371,7 +1233,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = classify::classify(analyze(cluster, HashMap::new()));
+        let health = classify::classify(analyze(cluster));
         assert!(
             matches!(
                 &health,
@@ -1421,7 +1283,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = classify::classify(analyze(cluster, HashMap::new()));
+        let health = classify::classify(analyze(cluster));
         assert!(
             matches!(
                 &health,
@@ -1470,7 +1332,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = classify::classify(analyze(cluster, HashMap::new()));
+        let health = classify::classify(analyze(cluster));
         assert!(
             matches!(
                 &health,
@@ -1519,7 +1381,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = classify::classify(analyze(cluster.clone(), HashMap::new()));
+        let health = classify::classify(analyze(cluster));
         assert!(
             matches!(
                 &health,
@@ -1562,7 +1424,7 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = classify::classify(analyze(cluster.clone(), HashMap::new()));
+        let health = classify::classify(analyze(cluster));
         assert!(
             matches!(
                 &health,
@@ -1607,38 +1469,10 @@ mod cluster_state_tests {
             ),
         ]);
 
-        let health = classify::classify(analyze(cluster.clone(), HashMap::new()));
+        let health = classify::classify(analyze(cluster));
         assert!(
             matches!(&health, ClusterHealth::Healthy { .. }),
             "expected Healthy (failed disk check ignored), got {health:?}"
         );
-    }
-
-    #[test]
-    #[cfg(feature = "prometheus")]
-    fn test_estimate_backup_progress() {
-        let replica_used_bytes = 415_626_584_064_u64; // ~415 GB
-        let primary_db_size = 1_000_000_000_000_u64; // 1 TB
-
-        let progress_pct = estimate_backup_progress(primary_db_size, replica_used_bytes);
-
-        // Expected progress: (415626584064 / 1000000000000) * 10000 = ~4156 (41.56%)
-        assert_eq!(progress_pct, 4156);
-    }
-
-    #[test]
-    #[cfg(feature = "prometheus")]
-    fn test_estimate_backup_progress_edge_cases() {
-        // Zero primary size
-        assert_eq!(estimate_backup_progress(0, 100), 0);
-
-        // Zero replica usage
-        assert_eq!(estimate_backup_progress(1000, 0), 0);
-
-        // 100% complete (100% = 10000)
-        assert_eq!(estimate_backup_progress(1000, 1000), 10000);
-
-        // Over 100% (more data on replica than primary DB, clamped to 10000)
-        assert_eq!(estimate_backup_progress(1000, 1500), 10000);
     }
 }

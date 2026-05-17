@@ -30,7 +30,7 @@
 //!     .await;
 //! ```
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use error_stack::{FutureExt as _, Report, ResultExt as _};
 use futures::future::join_all;
@@ -41,7 +41,6 @@ use tokio::{
 };
 
 use crate::{
-    prometheus::FileSystemMetrics,
     timings::{Event, Stage},
     v2::writer::WriterOptions,
 };
@@ -74,8 +73,6 @@ pub trait Timings {
 pub struct PipelineContext {
     /// Channel sender for emitting timing events.
     pub timings_tx: UnboundedSender<Event>,
-    /// Pre-loaded filesystem metrics keyed by cluster name.
-    pub batch_data: HashMap<String, FileSystemMetrics>,
     /// Configuration options for the output writer.
     pub writer_options: Arc<WriterOptions>,
 }
@@ -86,14 +83,9 @@ impl PipelineContext {
     /// # Arguments
     ///
     /// * `timings_tx` - Channel sender for emitting [`Event`]s to track stage timings.
-    pub fn new(
-        timings_tx: UnboundedSender<Event>,
-        batch_data: HashMap<String, FileSystemMetrics>,
-        writer_options: Arc<WriterOptions>,
-    ) -> Self {
+    pub fn new(timings_tx: UnboundedSender<Event>, writer_options: Arc<WriterOptions>) -> Self {
         Self {
             timings_tx,
-            batch_data,
             writer_options,
         }
     }
@@ -273,7 +265,6 @@ mod tests {
         let (timings_tx, _) = unbounded_channel::<Event>();
         let ctx = PipelineContext {
             timings_tx,
-            batch_data: HashMap::new(),
             writer_options: Arc::new(WriterOptions::default()),
         };
 

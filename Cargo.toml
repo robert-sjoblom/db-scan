@@ -236,11 +236,6 @@ redundant_else = { level = "allow", priority = 127 }
 # so we don't inline anything
 uninlined_format_args = { level = "allow", priority = 127 }
 
-[features]
-default = []
-# Enable Prometheus metric polling for backup progress tracking
-prometheus = ["reqwest-middleware"]
-
 [dependencies]
 anyhow = "1.0.100"
 openssh = { version = "0.11", features = ["native-mux"] }

@@ -14,7 +14,6 @@ Large parts of this readme (but not the code) was AI-summarized. Tread carefully
 - **Failover Detection**: Identifies clusters that have experienced failover
 - **Archive Failure Detection**: Detects when WAL archiving is enabled but has never succeeded
 - **Disk Health Checks** (optional): SSHes into nodes and parses `dmesg` for I/O, filesystem, and block device errors
-- **Backup Progress Tracking** (optional): Estimates pg_basebackup progress via Prometheus filesystem metrics
 - **Watch Mode**: Continuously rescans unhealthy clusters at a configurable interval
 - **Concurrent Scanning**: Parallel health checks across multiple clusters and nodes
 - **Multiple Output Formats**: Terminal output (with colors) and CSV export
@@ -33,12 +32,13 @@ Large parts of this readme (but not the code) was AI-summarized. Tread carefully
 
 The tool expects a REST API endpoint that returns PostgreSQL node information. The API must:
 
-**Endpoint**: `GET https://database.example.com/api/v1/nodes` (default)
+**Endpoint**: `GET <your-portal>/api/v1/nodes`
 
-You can configure a custom URL at compile time:
+Configure the URL in your config file (`$XDG_CONFIG_HOME/db-scan/config.yml`):
 
-```bash
-DATABASE_PORTAL_URL=https://your-api.com/api/v1/nodes cargo build --release
+```yaml
+database_portal:
+  url: https://your-api.com/api/v1/nodes
 ```
 
 **Cache Behavior**:
@@ -82,35 +82,12 @@ Nodes must follow the naming pattern: `{env}-pg-{app}-{db}.{zone}.{domain}`
 ### Build from Source
 
 ```bash
-# Basic build
 cargo build --release
-
-# Build with Prometheus integration for backup progress tracking
-PROMETHEUS_URL=https://prometheus.example.com DATABASE_PORTAL_URL=https://database.example.com cargo build --release --features prometheus
 ```
 
 The binary will be available at `target/release/db-scan`
 
 ### Optional Features
-
-#### Prometheus (backup progress tracking)
-
-```bash
-PROMETHEUS_URL=https://prometheus.example.com cargo build --release --features prometheus
-```
-
-**Requirements:**
-- Prometheus server with `node_exporter` metrics
-- Metrics: `node_filesystem_size_bytes` and `node_filesystem_avail_bytes`
-- Labels: `host` (hostname) and `mountpoint` (e.g., `/var/lib/pgsql`)
-
-**How it works:**
-1. Fetches filesystem metrics for all nodes at startup using a single batch query (e.g., `host=~"dev-pg-app001.*"`)
-2. For replicas using pg_basebackup, compares the replica's filesystem used bytes against the primary's
-3. Estimates progress: `(replica_used_bytes / primary_used_bytes) * 100`
-4. Progress stored as percentage * 100 (e.g., 4156 = 41.56%), keyed by replica IP address
-
-**Note:** Filesystem-to-filesystem comparison (not database size) — chosen for performance. Rough estimate; assumes both filesystems primarily contain PostgreSQL data.
 
 #### Disk health checks
 
@@ -237,14 +214,13 @@ db-scan --log-level debug
 Terminal output prints a stage-timings block followed by a cluster health table:
 
 ```
-Prometheus       124 ms
 Node Discovery     0 ms
 Scan             424 ms
 Clustering       454 ms
 Analysis         454 ms
 Output           454 ms
 ────────────────────────
-Total           1.91 s
+Total           1.78 s
 STATUS   CLUSTER        PRIMARY                    REPLICAS              LAG DISK REASON
 HEALTHY  dev-pg-app001  db001@sto1                 db002,db003           -   -    -
 CRITICAL prod-pg-app123 db001@sto1⁷ vs db002@sto2⁸ db003@sto3→db001@sto1 -   -    SplitBrain: replica overrides timeline (7 < 8)
@@ -327,9 +303,6 @@ src/
 ├── logging.rs                 # Tracing setup
 ├── pipeline.rs                # Scan → analyze → write orchestration
 ├── timings.rs                 # Stage timing instrumentation
-├── prometheus.rs              # Prometheus client (optional feature)
-├── prometheus/
-│   └── models.rs
 └── v2/
     ├── node.rs                # Node data structure
     ├── cluster.rs             # Cluster builder

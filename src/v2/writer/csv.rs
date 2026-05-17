@@ -102,7 +102,6 @@ mod tests {
                         timeline: Some(7),
                     },
                     conn_count: 1,
-                    backup_lag: None,
                 },
             ]),
             lag_bytes: None,

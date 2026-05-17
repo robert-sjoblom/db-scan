@@ -3,10 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::{
-    pipeline::PipelineContext,
-    v2::scan::{AnalyzedNode, health_check_primary::ReplicationConnection},
-};
+use crate::{pipeline::PipelineContext, v2::scan::AnalyzedNode};
 
 /// Listens for incoming Nodes, groups them by `cluster_id`, and sends complete Clusters
 /// to the provided cluster channel. A Cluster is considered complete when it has 3 Nodes.
@@ -90,19 +87,6 @@ impl Cluster {
                 "no single primary found in cluster"
             );
             None
-        }
-    }
-
-    /// Returns replication connections from the primary (if there's only one primary).
-    pub fn primary_replication_info(&self) -> Option<&Vec<ReplicationConnection>> {
-        use super::scan::Role;
-
-        let p = self.primary()?;
-        match &p.role {
-            Role::Primary { health } => Some(&health.replication),
-            Role::Unknown | Role::UnknownPrimary | Role::UnknownReplica | Role::Replica { .. } => {
-                None
-            }
         }
     }
 }
