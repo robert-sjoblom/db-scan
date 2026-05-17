@@ -121,6 +121,11 @@ pub(crate) mod tests_common {
             self
         }
 
+        pub fn with_timeline(mut self, id: i32) -> Self {
+            self.timeline_id = id;
+            self
+        }
+
         pub fn build(self) -> PrimaryHealthCheckResult {
             let base_lsn = "48F/6957B540";
             let has_high_lag = self
@@ -195,7 +200,6 @@ pub(crate) mod tests_common {
         has_wal_receiver: bool,
     }
 
-    #[expect(dead_code, reason = "test code only")]
     impl ReplicaHealthBuilder {
         pub fn new() -> Self {
             Self {
