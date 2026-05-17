@@ -10,12 +10,24 @@ pub(crate) fn update() -> anyhow::Result<()> {
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
         .bin_name(BIN_NAME)
+        .bin_path_in_archive("{{ bin }}-v{{ version }}-{{ target }}/{{ bin }}")
         .show_download_progress(true)
         .current_version(self_update::cargo_crate_version!())
         .build()
         .context("configuring self-update")?
-        .update()
-        .context("running self-update")?;
+        .update();
+
+    let status = match status {
+        Ok(s) => s,
+        Err(self_update::errors::Error::Io(e))
+            if e.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            anyhow::bail!(
+                "permission denied replacing the binary ({e}). Try `sudo db-scan self-update`, or reinstall db-scan to a user-writable location (e.g. ~/.local/bin)."
+            );
+        }
+        Err(e) => return Err(anyhow::Error::new(e).context("running self-update")),
+    };
 
     if status.updated() {
         println!("Updated db-scan to {}", status.version());
