@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/robert-sjoblom/db-scan/compare/v0.2.0...v0.2.1) (2026-05-17)
+
+
+### Bug Fixes
+
+* use rustls for self-update ([2ec9770](https://github.com/robert-sjoblom/db-scan/commit/2ec977098a0a2aa7f238a9dcadfd03f127026c63))
+
 ## [0.2.0](https://github.com/robert-sjoblom/db-scan/compare/v0.1.1...v0.2.0) (2026-05-17)
 
 
