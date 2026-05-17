@@ -39,6 +39,7 @@ pub(super) fn check_archive(primary: &AnalyzedNode, verdict: &mut Verdict) {
             NodeVerdict::ArchiveFailure {
                 failed_count: archiver.failed_count,
                 last_wal: archiver.last_failed_wal.clone(),
+                last_failed_at: archiver.last_failed_time,
             },
         );
     }
@@ -573,6 +574,7 @@ mod tests {
             &NodeVerdict::ArchiveFailure {
                 failed_count: 0,
                 last_wal: None,
+                last_failed_at: None,
             },
         ));
     }
