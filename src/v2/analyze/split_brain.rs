@@ -334,439 +334,206 @@ fn resolve_with_equal_timelines(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
 
-    // use std::net::Ipv4Addr;
+    use super::*;
+    use crate::v2::tests_common::{NodeBuilder, PrimaryHealthBuilder, ReplicaHealthBuilder};
 
-    // use chrono::Utc;
+    use pretty_assertions::assert_eq;
 
-    // use crate::v2::{
-    //     analyze::{
-    //         AnalyzedCluster, ClusterHealth, Reason, analyze,
-    //         cluster_state_tests::{
-    //             make_cluster, make_node, make_node_with_ip, make_primary_health,
-    //             make_primary_health_with_timeline, make_replica_health,
-    //         },
-    //     },
-    //     scan::health_check_replica::{LagInfo, ReplicaHealthCheckResult, WalReceiverInfo},
-    // };
+    fn primary(id: u32, name: &str, ip: Ipv4Addr, timeline: i32) -> AnalyzedNode {
+        NodeBuilder::new(name)
+            .with_id(id)
+            .with_ip(ip)
+            .with_primary(PrimaryHealthBuilder::new().with_timeline(timeline).build())
+            .build()
+    }
 
-    // use super::*;
+    fn replica_following(id: u32, name: &str, sender_ip: Ipv4Addr, timeline: i32) -> AnalyzedNode {
+        NodeBuilder::new(name)
+            .with_id(id)
+            .with_replica(
+                ReplicaHealthBuilder::new()
+                    .with_timeline(timeline)
+                    .with_sender_host(&sender_ip.to_string())
+                    .build(),
+            )
+            .build()
+    }
 
-    // #[test]
-    // fn test_critical_when_split_brain_two_primaries_same_timeline() {
-    //     // Both primaries have same timeline (11), replica is following db001 (sender_host: 127.1.12.151)
-    //     let cluster = make_cluster(vec![
-    //         make_node_with_ip(
-    //             1,
-    //             "dev-pg-app001-db001.sto1.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health(1, Some("00:00:00.001"))),
-    //             },
-    //             Ipv4Addr::new(127, 1, 12, 151),
-    //         ),
-    //         make_node_with_ip(
-    //             2,
-    //             "dev-pg-app001-db002.sto2.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health(1, Some("00:00:00.001"))),
-    //             },
-    //             Ipv4Addr::new(127, 2, 12, 151),
-    //         ),
-    //         make_node_with_ip(
-    //             3,
-    //             "dev-pg-app001-db003.sto3.example.com",
-    //             Role::Replica {
-    //                 health: Box::new(make_replica_health()), // sender_host: 127.1.12.151
-    //             },
-    //             Ipv4Addr::new(127, 3, 12, 151),
-    //         ),
-    //     ]);
+    const IP_DB1: Ipv4Addr = Ipv4Addr::new(127, 1, 12, 151);
+    const IP_DB2: Ipv4Addr = Ipv4Addr::new(127, 2, 12, 151);
+    const IP_DB3: Ipv4Addr = Ipv4Addr::new(127, 3, 12, 151);
 
-    //     let actual = analyze(cluster.clone(), HashMap::new());
-    //     // Both primaries have same timeline, replica's sender_host matches db001's IP
-    //     let expected = ClusterHealth::Critical {
-    //         cluster: AnalyzedCluster {
-    //             cluster,
-    //             backup_progress: HashMap::new(),
-    //         },
-    //         reason: Reason::SplitBrain(SplitBrainInfo {
-    //             true_primary: "dev-pg-app001-db001.sto1.example.com".to_owned(),
-    //             stale_primaries: vec!["dev-pg-app001-db002.sto2.example.com".to_owned()],
-    //             resolution: SplitBrainResolution::ReplicaFollowing {
-    //                 replicas_following_true: vec![
-    //                     "dev-pg-app001-db003.sto3.example.com".to_owned(),
-    //                 ],
-    //             },
-    //         }),
-    //     };
+    #[test]
+    fn higher_timeline_wins_when_no_replica_evidence() {
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let primaries = vec![&db1, &db2];
+        let replicas: Vec<&AnalyzedNode> = vec![];
 
-    //     assert_eq!(actual, expected);
-    // }
+        let info = resolve_split_brain(&primaries, &replicas);
 
-    // #[test]
-    // fn test_critical_split_brain_no_replica_evidence() {
-    //     // Scenario: 2 primaries detected (split brain), no replica to determine true primary
-    //     // Both have same timeline, no replica evidence - resolution is indeterminate
-    //     let cluster = make_cluster(vec![
-    //         make_node(
-    //             1,
-    //             "dev-pg-app001-db001.sto1.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health(0, None)),
-    //             },
-    //         ),
-    //         make_node(
-    //             2,
-    //             "dev-pg-app001-db002.sto2.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health(0, None)),
-    //             },
-    //         ),
-    //         make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
-    //     ]);
+        assert_eq!(
+            info,
+            SplitBrainInfo {
+                true_primary: "db002".to_owned(),
+                stale_primaries: vec!["db001".to_owned()],
+                resolution: SplitBrainResolution::HigherTimeline {
+                    true_primary_timeline: 12,
+                    stale_timeline: 11,
+                },
+            }
+        );
+    }
 
-    //     let actual = analyze(cluster.clone(), HashMap::new());
-    //     let expected = ClusterHealth::Critical {
-    //         cluster: AnalyzedCluster {
-    //             cluster,
-    //             backup_progress: HashMap::new(),
-    //         },
-    //         reason: Reason::SplitBrain(SplitBrainInfo {
-    //             // db001 is first in iteration order, but resolution is indeterminate
-    //             true_primary: "dev-pg-app001-db001.sto1.example.com".to_owned(),
-    //             stale_primaries: vec!["dev-pg-app001-db002.sto2.example.com".to_owned()],
-    //             resolution: SplitBrainResolution::Indeterminate,
-    //         }),
-    //     };
+    #[test]
+    fn timeline_and_replica_evidence_agree() {
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = replica_following(3, "db003", IP_DB2, 12);
+        let primaries = vec![&db1, &db2];
+        let replicas = vec![&db3];
 
-    //     assert_eq!(actual, expected);
-    // }
+        let info = resolve_split_brain(&primaries, &replicas);
 
-    // #[test]
-    // fn test_critical_split_brain_higher_timeline_wins() {
-    //     // Scenario: db001 has timeline 11, db002 has timeline 12 (more recent promotion)
-    //     // db002 should be identified as true primary
-    //     let cluster = make_cluster(vec![
-    //         make_node(
-    //             1,
-    //             "dev-pg-app001-db001.sto1.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health_with_timeline(0, None, 11)),
-    //             },
-    //         ),
-    //         make_node(
-    //             2,
-    //             "dev-pg-app001-db002.sto2.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health_with_timeline(0, None, 12)),
-    //             },
-    //         ),
-    //         make_node(3, "dev-pg-app001-db003.sto3.example.com", Role::Unknown),
-    //     ]);
+        assert_eq!(
+            info,
+            SplitBrainInfo {
+                true_primary: "db002".to_owned(),
+                stale_primaries: vec!["db001".to_owned()],
+                resolution: SplitBrainResolution::Both {
+                    true_primary_timeline: 12,
+                    stale_timeline: 11,
+                    replicas_following_true: vec!["db003".to_owned()],
+                },
+            }
+        );
+    }
 
-    //     let actual = analyze(cluster.clone(), HashMap::new());
-    //     let expected = ClusterHealth::Critical {
-    //         cluster: AnalyzedCluster {
-    //             cluster,
-    //             backup_progress: HashMap::new(),
-    //         },
-    //         reason: Reason::SplitBrain(SplitBrainInfo {
-    //             true_primary: "dev-pg-app001-db002.sto2.example.com".to_owned(),
-    //             stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_owned()],
-    //             resolution: SplitBrainResolution::HigherTimeline {
-    //                 true_primary_timeline: 12,
-    //                 stale_timeline: 11,
-    //             },
-    //         }),
-    //     };
+    #[test]
+    fn replica_following_lower_timeline_overrides() {
+        // db002 has higher timeline (isolated after promotion);
+        // replica still streams from db001 — db001 is the true primary.
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = replica_following(3, "db003", IP_DB1, 11);
+        let primaries = vec![&db1, &db2];
+        let replicas = vec![&db3];
 
-    //     assert_eq!(actual, expected);
-    // }
+        let info = resolve_split_brain(&primaries, &replicas);
 
-    // #[test]
-    // fn test_critical_split_brain_both_timeline_and_replica_evidence() {
-    //     // Scenario: db002 has higher timeline AND replica is following db002
-    //     // Use different IPs so we can match replica to the correct primary
-    //     let replica_health = ReplicaHealthCheckResult {
-    //         timeline_id: 12,
-    //         wal_receiver: Some(WalReceiverInfo {
-    //             pid: 4_053_449,
-    //             status: "streaming".to_owned(),
-    //             receive_start_lsn: "47F/67000000".to_owned(),
-    //             receive_start_tli: 12,
-    //             written_lsn: "48F/6957B540".to_owned(),
-    //             flushed_lsn: "48F/6957B540".to_owned(),
-    //             received_tli: 12,
-    //             last_msg_send_time: Some(Utc::now()),
-    //             last_msg_receipt_time: Some(Utc::now()),
-    //             latest_end_lsn: "48F/6957B540".to_owned(),
-    //             latest_end_time: Some(Utc::now()),
-    //             slot_name: None,
-    //             sender_host: "127.2.12.151".to_owned(), // db002's IP
-    //             sender_port: 5432,
-    //             conninfo: "user=replicator host=127.2.12.151".to_owned(),
-    //         }),
-    //         lag: LagInfo {
-    //             apply_lag_bytes: Some(0),
-    //             last_transaction_replay_at: Some(Utc::now()),
-    //         },
-    //         conflicts_by_db: HashMap::new(),
-    //         configuration: HashMap::new(),
-    //     };
+        assert_eq!(
+            info,
+            SplitBrainInfo {
+                true_primary: "db001".to_owned(),
+                stale_primaries: vec!["db002".to_owned()],
+                resolution: SplitBrainResolution::ReplicaOverridesTimeline {
+                    true_primary_timeline: 11,
+                    stale_timeline: 12,
+                    replicas_following_true: vec!["db003".to_owned()],
+                },
+            }
+        );
+    }
 
-    //     let cluster = make_cluster(vec![
-    //         make_node_with_ip(
-    //             1,
-    //             "dev-pg-app001-db001.sto1.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health_with_timeline(0, None, 11)),
-    //             },
-    //             Ipv4Addr::new(127, 1, 12, 151),
-    //         ),
-    //         make_node_with_ip(
-    //             2,
-    //             "dev-pg-app001-db002.sto2.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health_with_timeline(1, None, 12)),
-    //             },
-    //             Ipv4Addr::new(127, 2, 12, 151),
-    //         ),
-    //         make_node_with_ip(
-    //             3,
-    //             "dev-pg-app001-db003.sto3.example.com",
-    //             Role::Replica {
-    //                 health: Box::new(replica_health),
-    //             },
-    //             Ipv4Addr::new(127, 3, 12, 151),
-    //         ),
-    //     ]);
+    #[test]
+    fn equal_timelines_resolved_by_replica_following() {
+        let db1 = primary(1, "db001", IP_DB1, 13);
+        let db2 = primary(2, "db002", IP_DB2, 13);
+        let db3 = replica_following(3, "db003", IP_DB2, 13);
+        let primaries = vec![&db1, &db2];
+        let replicas = vec![&db3];
 
-    //     let actual = analyze(cluster.clone(), HashMap::new());
-    //     let expected = ClusterHealth::Critical {
-    //         cluster: AnalyzedCluster {
-    //             cluster,
-    //             backup_progress: HashMap::new(),
-    //         },
-    //         reason: Reason::SplitBrain(SplitBrainInfo {
-    //             true_primary: "dev-pg-app001-db002.sto2.example.com".to_owned(),
-    //             stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_owned()],
-    //             resolution: SplitBrainResolution::Both {
-    //                 true_primary_timeline: 12,
-    //                 stale_timeline: 11,
-    //                 replicas_following_true: vec![
-    //                     "dev-pg-app001-db003.sto3.example.com".to_owned(),
-    //                 ],
-    //             },
-    //         }),
-    //     };
+        let info = resolve_split_brain(&primaries, &replicas);
 
-    //     assert_eq!(actual, expected);
-    // }
+        assert_eq!(
+            info,
+            SplitBrainInfo {
+                true_primary: "db002".to_owned(),
+                stale_primaries: vec!["db001".to_owned()],
+                resolution: SplitBrainResolution::ReplicaFollowing {
+                    replicas_following_true: vec!["db003".to_owned()],
+                },
+            }
+        );
+    }
 
-    // #[test]
-    // fn test_critical_split_brain_replica_overrides_higher_timeline() {
-    //     // Scenario: db002 has higher timeline (12) but replica is following db001 (timeline 11)
-    //     // This happens when db002 was promoted but then isolated, while db001 continued serving
-    //     // The replica following db001 is the authoritative evidence of the true primary
-    //     let replica_health = ReplicaHealthCheckResult {
-    //         timeline_id: 11,
-    //         wal_receiver: Some(WalReceiverInfo {
-    //             pid: 4_053_449,
-    //             status: "streaming".to_owned(),
-    //             receive_start_lsn: "47F/67000000".to_owned(),
-    //             receive_start_tli: 11, // Following timeline 11 (db001)
-    //             written_lsn: "48F/6957B540".to_owned(),
-    //             flushed_lsn: "48F/6957B540".to_owned(),
-    //             received_tli: 11,
-    //             last_msg_send_time: Some(Utc::now()),
-    //             last_msg_receipt_time: Some(Utc::now()),
-    //             latest_end_lsn: "48F/6957B540".to_owned(),
-    //             latest_end_time: Some(Utc::now()),
-    //             slot_name: None,
-    //             sender_host: "127.1.12.151".to_owned(), // db001's IP
-    //             sender_port: 5432,
-    //             conninfo: "user=replicator host=127.1.12.151".to_owned(),
-    //         }),
-    //         lag: LagInfo {
-    //             apply_lag_bytes: Some(0),
-    //             last_transaction_replay_at: Some(Utc::now()),
-    //         },
-    //         conflicts_by_db: HashMap::new(),
-    //         configuration: HashMap::new(),
-    //     };
+    #[test]
+    fn equal_timelines_three_primaries_one_has_follower() {
+        // Three-way split with equal timelines; kills the `len > 1 -> ==` mutant
+        // (which would only match exactly-2 cases).
+        let db1 = primary(1, "db001", IP_DB1, 13);
+        let db2 = primary(2, "db002", IP_DB2, 13);
+        let db3 = primary(3, "db003", IP_DB3, 13);
+        let db4 = replica_following(4, "db004", IP_DB2, 13);
+        let primaries = vec![&db1, &db2, &db3];
+        let replicas = vec![&db4];
 
-    //     let cluster = make_cluster(vec![
-    //         make_node_with_ip(
-    //             1,
-    //             "dev-pg-app001-db001.sto1.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health_with_timeline(1, None, 11)), // Lower timeline but has replica
-    //             },
-    //             Ipv4Addr::new(127, 1, 12, 151),
-    //         ),
-    //         make_node_with_ip(
-    //             2,
-    //             "dev-pg-app001-db002.sto2.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health_with_timeline(0, None, 12)), // Higher timeline but isolated
-    //             },
-    //             Ipv4Addr::new(127, 2, 12, 151),
-    //         ),
-    //         make_node_with_ip(
-    //             3,
-    //             "dev-pg-app001-db003.sto3.example.com",
-    //             Role::Replica {
-    //                 health: Box::new(replica_health),
-    //             },
-    //             Ipv4Addr::new(127, 3, 12, 151),
-    //         ),
-    //     ]);
+        let info = resolve_split_brain(&primaries, &replicas);
 
-    //     let actual = analyze(cluster.clone(), HashMap::new());
-    //     // db001 is the true primary because the replica is following it,
-    //     // even though db002 has a higher timeline
-    //     let expected = ClusterHealth::Critical {
-    //         cluster: AnalyzedCluster {
-    //             cluster,
-    //             backup_progress: HashMap::new(),
-    //         },
-    //         reason: Reason::SplitBrain(SplitBrainInfo {
-    //             true_primary: "dev-pg-app001-db001.sto1.example.com".to_owned(),
-    //             stale_primaries: vec!["dev-pg-app001-db002.sto2.example.com".to_owned()],
-    //             resolution: SplitBrainResolution::ReplicaOverridesTimeline {
-    //                 true_primary_timeline: 11,
-    //                 stale_timeline: 12,
-    //                 replicas_following_true: vec![
-    //                     "dev-pg-app001-db003.sto3.example.com".to_owned(),
-    //                 ],
-    //             },
-    //         }),
-    //     };
+        assert_eq!(info.true_primary, "db002");
+        assert_eq!(info.stale_primaries.len(), 2);
+        assert!(info.stale_primaries.contains(&"db001".to_owned()));
+        assert!(info.stale_primaries.contains(&"db003".to_owned()));
+        assert_eq!(
+            info.resolution,
+            SplitBrainResolution::ReplicaFollowing {
+                replicas_following_true: vec!["db004".to_owned()],
+            }
+        );
+    }
 
-    //     assert_eq!(actual, expected);
-    // }
+    #[test]
+    fn equal_timelines_no_replica_evidence_is_indeterminate() {
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary(2, "db002", IP_DB2, 11);
+        let primaries = vec![&db1, &db2];
+        let replicas: Vec<&AnalyzedNode> = vec![];
 
-    // #[test]
-    // fn test_critical_split_brain_after_hard_failover_replica_follows_new_primary() {
-    //     // Scenario: Hard failover occurred, db002 was promoted to primary.
-    //     // db001 came back online as a stale primary (same timeline, no replicas).
-    //     // db003 correctly reconnected to db002 (the new primary).
-    //     // Both primaries have the same timeline, so we rely on replica evidence.
-    //     // db002 should be identified as the true primary because db003 follows it.
-    //     let replica_health = ReplicaHealthCheckResult {
-    //         timeline_id: 13,
-    //         wal_receiver: Some(WalReceiverInfo {
-    //             pid: 2_727_816,
-    //             status: "streaming".to_owned(),
-    //             receive_start_lsn: "281/7D000000".to_owned(),
-    //             receive_start_tli: 13,
-    //             written_lsn: "281/BAAA6510".to_owned(),
-    //             flushed_lsn: "281/BAAA6510".to_owned(),
-    //             received_tli: 13,
-    //             last_msg_send_time: Some(Utc::now()),
-    //             last_msg_receipt_time: Some(Utc::now()),
-    //             latest_end_lsn: "281/BAAA6510".to_owned(),
-    //             latest_end_time: Some(Utc::now()),
-    //             slot_name: None,
-    //             sender_host: "127.2.12.162".to_owned(), // db002's IP - following new primary
-    //             sender_port: 5432,
-    //             conninfo: "user=replicator host=127.2.12.162".to_owned(),
-    //         }),
-    //         lag: LagInfo {
-    //             apply_lag_bytes: Some(0),
-    //             last_transaction_replay_at: Some(Utc::now()),
-    //         },
-    //         conflicts_by_db: HashMap::new(),
-    //         configuration: HashMap::new(),
-    //     };
+        let info = resolve_split_brain(&primaries, &replicas);
 
-    //     let cluster = make_cluster(vec![
-    //         // db001: Stale primary that came back after failover (no replicas connected)
-    //         make_node_with_ip(
-    //             1,
-    //             "dev-pg-app001-db001.sto1.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health_with_timeline(0, None, 13)),
-    //             },
-    //             Ipv4Addr::new(127, 1, 12, 162),
-    //         ),
-    //         // db002: New primary (promoted during failover, has db003 streaming)
-    //         make_node_with_ip(
-    //             2,
-    //             "dev-pg-app001-db002.sto2.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health_with_timeline(1, None, 13)),
-    //             },
-    //             Ipv4Addr::new(127, 2, 12, 162),
-    //         ),
-    //         // db003: Replica correctly following db002
-    //         make_node_with_ip(
-    //             3,
-    //             "dev-pg-app001-db003.sto3.example.com",
-    //             Role::Replica {
-    //                 health: Box::new(replica_health),
-    //             },
-    //             Ipv4Addr::new(127, 3, 12, 162),
-    //         ),
-    //     ]);
+        assert_eq!(
+            info,
+            SplitBrainInfo {
+                true_primary: "db001".to_owned(),
+                stale_primaries: vec!["db002".to_owned()],
+                resolution: SplitBrainResolution::Indeterminate,
+            }
+        );
+    }
 
-    //     let actual = analyze(cluster.clone(), HashMap::new());
-    //     // db002 is the true primary because the replica is following it
-    //     let expected = ClusterHealth::Critical {
-    //         cluster: AnalyzedCluster {
-    //             cluster,
-    //             backup_progress: HashMap::new(),
-    //         },
-    //         reason: Reason::SplitBrain(SplitBrainInfo {
-    //             true_primary: "dev-pg-app001-db002.sto2.example.com".to_owned(),
-    //             stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_owned()],
-    //             resolution: SplitBrainResolution::ReplicaFollowing {
-    //                 replicas_following_true: vec![
-    //                     "dev-pg-app001-db003.sto3.example.com".to_owned(),
-    //                 ],
-    //             },
-    //         }),
-    //     };
+    #[test]
+    fn build_replica_following_map_groups_by_sender_ip() {
+        let db1 = primary(1, "db001", IP_DB1, 12);
+        let db2 = primary(2, "db002", IP_DB2, 11);
+        let r1 = replica_following(3, "r1", IP_DB1, 12);
+        let r2 = replica_following(4, "r2", IP_DB1, 12);
+        let r3 = replica_following(5, "r3", IP_DB2, 11);
+        let primaries = vec![&db1, &db2];
+        let replicas = vec![&r1, &r2, &r3];
 
-    //     assert_eq!(actual, expected);
-    // }
+        let info = extract_timeline_info(&primaries);
+        let map = build_replica_following_map(&info, &replicas);
 
-    // #[test]
-    // fn test_critical_primary_with_two_unreachable_replicas() {
-    //     // Primary reachable + one replica reachable (but replica count is 0)
-    //     let cluster = make_cluster(vec![
-    //         make_node(
-    //             1,
-    //             "dev-pg-app001-db001.sto1.example.com",
-    //             Role::Primary {
-    //                 health: Box::new(make_primary_health(0, None)),
-    //             },
-    //         ),
-    //         make_node(
-    //             2,
-    //             "dev-pg-app001-db002.sto2.example.com",
-    //             Role::Replica {
-    //                 health: Box::new(make_replica_health()),
-    //             },
-    //         ),
-    //         make_node(
-    //             3,
-    //             "dev-pg-app001-db003.sto3.example.com",
-    //             Role::UnknownReplica,
-    //         ),
-    //     ]);
+        assert_eq!(map.get("db001").unwrap().len(), 2);
+        assert!(map.get("db001").unwrap().contains(&"r1".to_owned()));
+        assert!(map.get("db001").unwrap().contains(&"r2".to_owned()));
+        assert_eq!(map.get("db002").unwrap(), &vec!["r3".to_owned()]);
+    }
 
-    //     let actual = analyze(cluster.clone(), HashMap::new());
-    //     // 1 primary + 1 replica = Degraded with ReducedRedundancy
-    //     let expected = ClusterHealth::Degraded {
-    //         lag: 0,
-    //         cluster: AnalyzedCluster {
-    //             cluster,
-    //             backup_progress: HashMap::new(),
-    //         },
-    //         reason: Reason::ReducedRedundancy,
-    //     };
+    #[test]
+    fn extract_timeline_info_partitions_by_highest() {
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = primary(3, "db003", IP_DB3, 12);
+        let primaries = vec![&db1, &db2, &db3];
 
-    //     assert_eq!(actual, expected);
-    // }
+        let info = extract_timeline_info(&primaries);
+
+        assert_eq!(info.highest_timeline, 12);
+        assert_eq!(info.primaries_with_highest_timeline.len(), 2);
+        assert_eq!(info.primaries_with_lower_timeline.len(), 1);
+        assert_eq!(info.primaries_with_lower_timeline[0].0.node_name, "db001");
+    }
 }

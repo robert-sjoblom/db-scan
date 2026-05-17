@@ -1184,6 +1184,68 @@ mod cluster_state_tests {
         );
     }
 
+    #[test]
+    fn analyze_pipeline_wires_split_brain_into_cluster_verdict() {
+        // Integration check: two primaries with equal timelines, one replica streaming
+        // from db002. Verifies analyze() routes through resolve_split_brain and surfaces
+        // a populated ClusterVerdict::SplitBrain — regression guard for the wiring,
+        // not the resolution logic (covered by split_brain unit tests).
+        use std::net::Ipv4Addr;
+
+        use crate::v2::analyze::split_brain::{SplitBrainInfo, SplitBrainResolution};
+
+        let ip_db1 = Ipv4Addr::new(127, 1, 12, 151);
+        let ip_db2 = Ipv4Addr::new(127, 2, 12, 151);
+
+        let db1 = NodeBuilder::new("dev-pg-app001-db001.sto1.example.com")
+            .with_id(1)
+            .with_ip(ip_db1)
+            .with_primary(PrimaryHealthBuilder::new().with_timeline(13).build())
+            .build();
+        let db2 = NodeBuilder::new("dev-pg-app001-db002.sto2.example.com")
+            .with_id(2)
+            .with_ip(ip_db2)
+            .with_primary(PrimaryHealthBuilder::new().with_timeline(13).build())
+            .build();
+        let db3 = NodeBuilder::new("dev-pg-app001-db003.sto3.example.com")
+            .with_id(3)
+            .with_replica(
+                crate::v2::tests_common::ReplicaHealthBuilder::new()
+                    .with_timeline(13)
+                    .with_sender_host(&ip_db2.to_string())
+                    .build(),
+            )
+            .build();
+        let cluster = make_cluster(vec![db1, db2, db3]);
+
+        let actual = classify::classify(analyze(cluster));
+
+        assert!(
+            matches!(
+                &actual,
+                ClusterHealth::Critical {
+                    reason: Reason::SplitBrain,
+                    ..
+                }
+            ),
+            "expected Critical SplitBrain, got {actual:?}"
+        );
+
+        let verdict = &actual.cluster().verdict;
+        assert_eq!(
+            verdict.cluster_verdict(),
+            Some(&ClusterVerdict::SplitBrain(SplitBrainInfo {
+                true_primary: "dev-pg-app001-db002.sto2.example.com".to_owned(),
+                stale_primaries: vec!["dev-pg-app001-db001.sto1.example.com".to_owned()],
+                resolution: SplitBrainResolution::ReplicaFollowing {
+                    replicas_following_true: vec![
+                        "dev-pg-app001-db003.sto3.example.com".to_owned(),
+                    ],
+                },
+            })),
+        );
+    }
+
     fn make_node_with_disk(
         id: u32,
         name: &str,
