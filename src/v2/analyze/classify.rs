@@ -159,7 +159,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::archive_failure(NodeVerdict::ArchiveFailure { failed_count: 1, last_wal: None }, Some(Reason::ArchiveFailure))]
+    #[case::archive_failure(NodeVerdict::ArchiveFailure { failed_count: 1, last_wal: None, last_failed_at: None }, Some(Reason::ArchiveFailure))]
     #[case::archiving_disabled(NodeVerdict::ArchivingDisabled, Some(Reason::ArchivingDisabled))]
     #[case::sync_commit_off(NodeVerdict::SyncCommitOff, Some(Reason::SyncCommitOff))]
     #[case::high_lag(NodeVerdict::HighLag { bytes: 100 }, Some(Reason::HighReplicationLag))]

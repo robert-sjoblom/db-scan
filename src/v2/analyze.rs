@@ -216,6 +216,7 @@ pub enum NodeVerdict {
     ArchiveFailure {
         failed_count: i64,
         last_wal: Option<String>,
+        last_failed_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     ArchivingDisabled,
     IsFailoverNode,
@@ -934,6 +935,7 @@ mod cluster_state_tests {
             NodeVerdict::ArchiveFailure {
                 failed_count,
                 last_wal,
+                ..
             } => Some((*failed_count, last_wal.as_deref())),
             _ => None,
         });
@@ -1074,6 +1076,7 @@ mod cluster_state_tests {
                 NodeVerdict::ArchiveFailure {
                     failed_count,
                     last_wal,
+                    ..
                 } => Some((*failed_count, last_wal.as_deref())),
                 _ => None,
             });

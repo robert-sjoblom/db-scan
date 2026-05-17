@@ -567,20 +567,28 @@ fn format_reason(reason: &Reason, verdict: &Verdict) -> (String, String) {
                 if let NodeVerdict::ArchiveFailure {
                     failed_count,
                     last_wal,
+                    last_failed_at,
                 } = v
                 {
-                    Some((*failed_count, last_wal.as_deref()))
+                    Some((*failed_count, last_wal.as_deref(), *last_failed_at))
                 } else {
                     None
                 }
             });
-            let Some((failed_count, last_failed_wal)) = archive else {
+            let Some((failed_count, last_failed_wal, last_failed_at)) = archive else {
                 return ("ArchiveFailure".to_owned(), "{}".to_owned());
             };
-            let short = format!("ArchiveFailure: {} failures", failed_count);
+            let short = match last_failed_at {
+                Some(ts) => format!(
+                    "ArchiveFailure: {failed_count} failures (last {})",
+                    ts.format("%Y-%m-%d %H:%M UTC")
+                ),
+                None => format!("ArchiveFailure: {failed_count} failures"),
+            };
             let details = serde_json::json!({
                 "failed_count": failed_count,
-                "last_failed_wal": last_failed_wal
+                "last_failed_wal": last_failed_wal,
+                "last_failed_at": last_failed_at,
             })
             .to_string();
             (short, details)
