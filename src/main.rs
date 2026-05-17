@@ -4,12 +4,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use error_stack::Report;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     config::{CONFIG, get_config},
-    pipeline::{Pipeline, PipelineContext, PipelineError},
+    pipeline::{Pipeline, PipelineContext},
     timings::{Event, Stage},
     v2::{
         analyze::analyze_clusters,
@@ -22,6 +21,7 @@ use crate::{
 
 mod config;
 mod database_portal;
+mod errors;
 mod logging;
 mod pipeline;
 mod timings;
@@ -179,7 +179,7 @@ async fn run_scan(
     timings_tx: &UnboundedSender<Event>,
     writer_options: Arc<WriterOptions>,
     cluster_filter: Option<&HashSet<String>>,
-) -> Result<ScanResult, Report<PipelineError>> {
+) -> anyhow::Result<ScanResult> {
     let pipeline_ctx = PipelineContext::new(timings_tx.clone(), writer_options);
 
     // Clone filter for the spawned task (needs 'static)
@@ -211,7 +211,7 @@ async fn filter_nodes(
     let nodes = match database_portal::nodes().await {
         Ok(nodes) => nodes,
         Err(e) => {
-            tracing::error!(error = %e, "failed to fetch nodes from database portal");
+            tracing::error!(error = ?e, "failed to fetch nodes from database portal");
             let _ = ctx.timings_tx.send(Event::End(Stage::DatabasePortal));
             return;
         }

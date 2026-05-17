@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use error_stack::{FutureExt as _, Report, ResultExt as _};
+use anyhow::Context as _;
 use futures::future::join_all;
 use tokio::{
     spawn,
@@ -44,23 +44,6 @@ use crate::{
     timings::{Event, Stage},
     v2::writer::WriterOptions,
 };
-
-/// Error type for task failures within a [`Pipeline`].
-///
-/// Captures which pipeline stage failed for better error context.
-#[derive(Debug)]
-pub struct PipelineError {
-    /// The pipeline stage that failed.
-    pub stage: Stage,
-}
-
-impl std::fmt::Display for PipelineError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Task '{}' failed", self.stage)
-    }
-}
-
-impl core::error::Error for PipelineError {}
 
 pub trait Timings {
     fn timings(&self) -> &UnboundedSender<Event>;
@@ -231,18 +214,21 @@ impl<R> RunnablePipeline<R> {
     /// Execute the pipeline, waiting for all stages to complete.
     ///
     /// Returns the result produced by the sink.
-    pub async fn run(self) -> Result<R, Report<PipelineError>> {
+    pub async fn run(self) -> anyhow::Result<R> {
         let void_futures = self.handles.into_iter().map(|(stage, handle)| async move {
-            handle.await.change_context(PipelineError { stage })?;
-            Ok::<_, Report<PipelineError>>(())
+            handle
+                .await
+                .with_context(|| format!("pipeline stage '{stage}' failed"))?;
+            anyhow::Ok(())
         });
 
-        let (void_results, result) = futures::future::join(
-            join_all(void_futures),
-            self.sink_handle.1.change_context(PipelineError {
-                stage: self.sink_handle.0,
-            }),
-        )
+        let sink_stage = self.sink_handle.0;
+        let (void_results, result) = futures::future::join(join_all(void_futures), async move {
+            self.sink_handle
+                .1
+                .await
+                .with_context(|| format!("pipeline stage '{sink_stage}' failed"))
+        })
         .await;
         for result in void_results {
             result?;

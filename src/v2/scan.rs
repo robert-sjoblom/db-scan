@@ -8,11 +8,14 @@ use tokio::sync::{
 use tokio_postgres::Client;
 use tracing::instrument;
 
+use anyhow::Context as _;
+
 use crate::{
     config::get_config,
+    errors::{self, DbErrorKind},
     pipeline::PipelineContext,
     v2::{
-        db::{self, db_error::DbError},
+        db,
         node::Node,
         scan::{disk_check::DiskCheckOutcome, health_check_primary::PrimaryHealthCheckResult},
     },
@@ -87,7 +90,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                             node_name = %node.name,
                             attempt = attempt,
                             max_attempts = 3,
-                            error = %e,
+                            error = ?e,
                             "connection attempt failed, retrying"
                         );
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -96,7 +99,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                             node_name = %node.name,
                             attempt = attempt,
                             max_attempts = 3,
-                            error = %e,
+                            error = ?e,
                             "connection failed after all retries"
                         );
                     }
@@ -106,7 +109,8 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
         }
 
         // If we get here, all retries failed
-        let e = last_error.unwrap();
+        let err = last_error.unwrap();
+        let kind = errors::extract_kind(&err);
         let disk_check = collect_disk_check(disk_check_handle.take()).await;
         if let Ok(()) = tx.send(AnalyzedNode {
             id: node.id,
@@ -115,7 +119,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
             pg_version: node.pg_version.clone(),
             ip_address: node.ip_address,
             role: Role::Unknown,
-            errors: vec![e],
+            errors: vec![kind],
             disk_check,
         }) {
             tracing::trace!(node_name = %node.name, "sent analyzed node after connection failure");
@@ -129,7 +133,13 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
     let conn_node = Arc::clone(&node);
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            tracing::error!(node_name = %conn_node.name, error = %e, "postgres connection closed with error");
+            let kind = errors::classify_postgres(&e);
+            tracing::error!(
+                node_name = %conn_node.name,
+                error = ?e,
+                kind = ?kind,
+                "postgres connection closed with error",
+            );
             match conn_tx.send(AnalyzedNode {
                 id: conn_node.id,
                 cluster_id: conn_node.cluster_id,
@@ -137,7 +147,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                 pg_version: conn_node.pg_version.clone(),
                 ip_address: conn_node.ip_address,
                 role: Role::Unknown,
-                errors: vec![e.into()],
+                errors: vec![kind],
                 disk_check: None,
             }) {
                 Ok(()) => {
@@ -152,7 +162,9 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
 
     let primary = match is_primary(&client).await {
         Ok(r) => r,
-        Err(e) => {
+        Err(err) => {
+            let kind = errors::extract_kind(&err);
+            tracing::error!(node_name = %node.name, error = ?err, "is_primary check failed");
             let node_r = Arc::clone(&node);
             let disk_check = collect_disk_check(disk_check_handle.take()).await;
             return match tx.send(AnalyzedNode {
@@ -162,7 +174,7 @@ async fn scan(node: Node, tx: UnboundedSender<AnalyzedNode>) {
                 pg_version: node.pg_version.clone(),
                 ip_address: node.ip_address,
                 role: Role::Unknown,
-                errors: vec![e],
+                errors: vec![kind],
                 disk_check,
             }) {
                 Ok(()) => {
@@ -207,19 +219,16 @@ async fn collect_disk_check(
 }
 
 #[instrument(skip(client), level = "trace")]
-async fn is_primary(client: &Client) -> Result<bool, DbError> {
-    match client.query_one("SELECT pg_is_in_recovery()", &[]).await {
-        Ok(row) => {
-            let in_recovery = row.get::<usize, bool>(0);
-            let is_primary = !in_recovery;
-            tracing::debug!(is_primary, in_recovery, "Determined node role");
-            Ok(is_primary)
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to determine if node is primary");
-            Err(e.into())
-        }
-    }
+async fn is_primary(client: &Client) -> anyhow::Result<bool> {
+    let row = client
+        .query_one("SELECT pg_is_in_recovery()", &[])
+        .await
+        .map_err(errors::pg_err)
+        .context("attempting: SELECT pg_is_in_recovery()")?;
+    let in_recovery = row.get::<usize, bool>(0);
+    let is_primary = !in_recovery;
+    tracing::debug!(is_primary, in_recovery, "Determined node role");
+    Ok(is_primary)
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -231,7 +240,8 @@ pub struct AnalyzedNode {
     pub pg_version: String,
     pub ip_address: Ipv4Addr,
     pub role: Role,
-    pub errors: Vec<DbError>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<DbErrorKind>,
     /// Disk health check result (populated for all nodes when --check-disks is set).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_check: Option<DiskCheckOutcome>,
