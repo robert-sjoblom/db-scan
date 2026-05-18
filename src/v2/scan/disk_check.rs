@@ -1,10 +1,13 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use openssh::{KnownHosts, Session};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use crate::{config::get_config, v2::node::Node};
+use crate::v2::node::Node;
+
+const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const SSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Result of checking dmesg for disk-related errors via SSH.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,37 +38,66 @@ pub(super) async fn check_disk_health(node: &Arc<Node>, ssh_user: &str) -> DiskC
     let destination = format!("{}@{}", ssh_user, node.ip_address);
     tracing::debug!(destination = %destination, "connecting via SSH for disk check");
 
-    let session = match Session::connect_mux(&destination, KnownHosts::Accept).await {
-        Ok(s) => s,
-        Err(e) => {
+    let session = match tokio::time::timeout(
+        SSH_CONNECT_TIMEOUT,
+        Session::connect_mux(&destination, KnownHosts::Accept),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             tracing::warn!(error = %e, "SSH connection failed");
             return DiskCheckOutcome::Failed {
                 reason: format!("SSH connection failed: {e}"),
             };
         }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = SSH_CONNECT_TIMEOUT.as_secs(),
+                "SSH connect timed out"
+            );
+            return DiskCheckOutcome::Failed {
+                reason: format!(
+                    "SSH connect timed out after {}s",
+                    SSH_CONNECT_TIMEOUT.as_secs()
+                ),
+            };
+        }
     };
 
-    let window = get_config().disk_check_window_minutes;
-    let output = match session
-        .command("dmesg")
-        .arg("-T")
-        .arg("--since")
-        .arg(format!("{window} minutes ago"))
-        .raw_arg("2>/dev/null")
-        .raw_arg("|")
-        .arg("grep")
-        .arg("-iE")
-        .arg("I/O error|Buffer I/O|EXT4-fs error|XFS.*error|blk_update_request")
-        .raw_arg("||")
-        .arg("true")
-        .output()
-        .await
+    let output = match tokio::time::timeout(
+        SSH_COMMAND_TIMEOUT,
+        session
+            .command("dmesg")
+            .arg("-T")
+            .raw_arg("2>/dev/null")
+            .raw_arg("|")
+            .arg("grep")
+            .arg("-iE")
+            .arg("I/O error|Buffer I/O|EXT4-fs error|XFS.*error|blk_update_request")
+            .raw_arg("||")
+            .arg("true")
+            .output(),
+    )
+    .await
     {
-        Ok(o) => o,
-        Err(e) => {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
             tracing::warn!(error = %e, "dmesg command failed");
             return DiskCheckOutcome::Failed {
                 reason: format!("dmesg command failed: {e}"),
+            };
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = SSH_COMMAND_TIMEOUT.as_secs(),
+                "dmesg command timed out"
+            );
+            return DiskCheckOutcome::Failed {
+                reason: format!(
+                    "dmesg command timed out after {}s",
+                    SSH_COMMAND_TIMEOUT.as_secs()
+                ),
             };
         }
     };
