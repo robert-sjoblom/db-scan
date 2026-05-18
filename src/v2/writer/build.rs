@@ -218,6 +218,7 @@ fn build_primary_replicas_for_critical(
         | Reason::ChainedReplica
         | Reason::NotInQuorum
         | Reason::ArchiveFailure
+        | Reason::ArchiveLagging
         | Reason::ArchivingDisabled
         | Reason::SyncCommitOff
         | Reason::NoNodesReachable
@@ -334,6 +335,7 @@ fn log_critical(cluster: &AnalyzedCluster, reason: &Reason, reason_str: &str) {
         | Reason::ChainedReplica
         | Reason::NotInQuorum
         | Reason::ArchiveFailure
+        | Reason::ArchiveLagging
         | Reason::ArchivingDisabled
         | Reason::SyncCommitOff
         | Reason::NoNodesReachable
@@ -589,6 +591,45 @@ fn format_reason(reason: &Reason, verdict: &Verdict) -> (String, String) {
                 "failed_count": failed_count,
                 "last_failed_wal": last_failed_wal,
                 "last_failed_at": last_failed_at,
+            })
+            .to_string();
+            (short, details)
+        }
+        Reason::ArchiveLagging => {
+            let archive = verdict.node_verdicts().iter().find_map(|(_, v)| {
+                if let NodeVerdict::ArchiveLagging {
+                    failed_count,
+                    last_wal,
+                    last_failed_at,
+                    last_archived_at,
+                } = v
+                {
+                    Some((
+                        *failed_count,
+                        last_wal.as_deref(),
+                        *last_failed_at,
+                        *last_archived_at,
+                    ))
+                } else {
+                    None
+                }
+            });
+            let Some((failed_count, last_failed_wal, last_failed_at, last_archived_at)) = archive
+            else {
+                return ("ArchiveLagging".to_owned(), "{}".to_owned());
+            };
+            let short = match last_failed_at {
+                Some(ts) => format!(
+                    "ArchiveLagging: {failed_count} failures (last {})",
+                    ts.format("%Y-%m-%d %H:%M UTC")
+                ),
+                None => format!("ArchiveLagging: {failed_count} failures"),
+            };
+            let details = serde_json::json!({
+                "failed_count": failed_count,
+                "last_failed_wal": last_failed_wal,
+                "last_failed_at": last_failed_at,
+                "last_archived_at": last_archived_at,
             })
             .to_string();
             (short, details)

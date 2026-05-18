@@ -135,6 +135,10 @@ pub enum Reason {
     /// A replica has `wal_receiver` = None, indicating it's rebuilding or disconnected.
     RebuildingReplica,
     HighReplicationLag,
+    /// Archive was working but the most recent push failed
+    /// (`last_failed_time > last_archived_time`). WAL is retained until the
+    /// next successful push, so durability isn't yet lost.
+    ArchiveLagging,
     /// One or more nodes are unreachable; pg-level reduced-redundancy state
     /// outranks lower Degraded findings so it surfaces as the headline reason.
     ReducedRedundancy,
@@ -217,6 +221,12 @@ pub enum NodeVerdict {
         failed_count: i64,
         last_wal: Option<String>,
         last_failed_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    ArchiveLagging {
+        failed_count: i64,
+        last_wal: Option<String>,
+        last_failed_at: Option<chrono::DateTime<chrono::Utc>>,
+        last_archived_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     ArchivingDisabled,
     IsFailoverNode,

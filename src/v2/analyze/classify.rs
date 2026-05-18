@@ -54,6 +54,7 @@ impl From<&NodeVerdict> for Option<Reason> {
     fn from(value: &NodeVerdict) -> Self {
         match value {
             NodeVerdict::ArchiveFailure { .. } => Some(Reason::ArchiveFailure),
+            NodeVerdict::ArchiveLagging { .. } => Some(Reason::ArchiveLagging),
             NodeVerdict::ArchivingDisabled => Some(Reason::ArchivingDisabled),
             NodeVerdict::IsFailoverNode => None,
             NodeVerdict::HighLag { .. } => Some(Reason::HighReplicationLag),
@@ -73,6 +74,7 @@ impl From<&Reason> for Tier {
         match value {
             Reason::ReducedRedundancy
             | Reason::HighReplicationLag
+            | Reason::ArchiveLagging
             | Reason::RebuildingReplica
             | Reason::ChainedReplica
             | Reason::NotInQuorum
@@ -122,7 +124,8 @@ mod tests {
             Reason::ChainedReplica => 12,
             Reason::RebuildingReplica => 13,
             Reason::HighReplicationLag => 14,
-            Reason::ReducedRedundancy => 15,
+            Reason::ArchiveLagging => 15,
+            Reason::ReducedRedundancy => 16,
             // Critical tier, least → most severe.
             Reason::SyncCommitOff => 20,
             Reason::ArchivingDisabled => 21,
@@ -160,6 +163,7 @@ mod tests {
 
     #[rstest]
     #[case::archive_failure(NodeVerdict::ArchiveFailure { failed_count: 1, last_wal: None, last_failed_at: None }, Some(Reason::ArchiveFailure))]
+    #[case::archive_lagging(NodeVerdict::ArchiveLagging { failed_count: 1, last_wal: None, last_failed_at: None, last_archived_at: None }, Some(Reason::ArchiveLagging))]
     #[case::archiving_disabled(NodeVerdict::ArchivingDisabled, Some(Reason::ArchivingDisabled))]
     #[case::sync_commit_off(NodeVerdict::SyncCommitOff, Some(Reason::SyncCommitOff))]
     #[case::high_lag(NodeVerdict::HighLag { bytes: 100 }, Some(Reason::HighReplicationLag))]
@@ -186,6 +190,7 @@ mod tests {
     #[case::writes_blocked(Reason::WritesBlocked, Tier::Critical)]
     #[case::writes_unprotected(Reason::WritesUnprotected, Tier::Critical)]
     #[case::archive_failure(Reason::ArchiveFailure, Tier::Critical)]
+    #[case::archive_lagging(Reason::ArchiveLagging, Tier::Degraded)]
     #[case::archiving_disabled(Reason::ArchivingDisabled, Tier::Critical)]
     #[case::filesystem_errors(Reason::FilesystemErrors, Tier::Critical)]
     #[case::sync_commit_off(Reason::SyncCommitOff, Tier::Critical)]

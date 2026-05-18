@@ -16,8 +16,10 @@ use crate::v2::{
 /// - `archived_count` = 0 (no successful archives)
 /// - `failed_count` > 0 (there have been failures)
 ///
-/// TODO: Consider adding Degraded state when `last_failed_time > last_archived_time`
-/// (archive was working but most recent attempt failed). WAL archives at least every 15 min.
+/// Also emits a Degraded `ArchiveLagging` verdict when archiving has succeeded
+/// before but the most recent attempt failed (`last_failed_time >
+/// last_archived_time`). WAL is retained until the next push succeeds, so this
+/// is a warning, not a durability outage.
 pub(super) fn check_archive(primary: &AnalyzedNode, verdict: &mut Verdict) {
     let Role::Primary { health } = &primary.role else {
         return;
@@ -40,6 +42,21 @@ pub(super) fn check_archive(primary: &AnalyzedNode, verdict: &mut Verdict) {
                 failed_count: archiver.failed_count,
                 last_wal: archiver.last_failed_wal.clone(),
                 last_failed_at: archiver.last_failed_time,
+            },
+        );
+        return;
+    }
+
+    if let (Some(failed), Some(archived)) = (archiver.last_failed_time, archiver.last_archived_time)
+        && failed > archived
+    {
+        verdict.push_node_verdict(
+            primary.node_name.clone(),
+            NodeVerdict::ArchiveLagging {
+                failed_count: archiver.failed_count,
+                last_wal: archiver.last_failed_wal.clone(),
+                last_failed_at: archiver.last_failed_time,
+                last_archived_at: archiver.last_archived_time,
             },
         );
     }
@@ -387,6 +404,7 @@ mod tests {
         },
         tests_common::{PrimaryHealthBuilder, ReplicaHealthBuilder},
     };
+    use chrono::Duration;
     use rstest::rstest;
     use std::net::Ipv4Addr;
 
@@ -587,6 +605,54 @@ mod tests {
             ..empty_archiver()
         };
         let h = PrimaryHealthBuilder::new().with_archiver(archiver).build();
+        let mut verdict = Verdict::default();
+
+        check_archive(&primary_node(h), &mut verdict);
+
+        assert!(verdict.node_verdicts.is_empty());
+    }
+
+    #[test]
+    fn check_archive_flags_lagging_when_last_failure_newer_than_last_archive() {
+        let archived_at = chrono::Utc::now() - Duration::minutes(20);
+        let failed_at = chrono::Utc::now() - Duration::minutes(2);
+        let stats = ArchiverStats {
+            archived_count: 100,
+            failed_count: 3,
+            last_archived_wal: Some("000000010000000000000040".to_owned()),
+            last_archived_time: Some(archived_at),
+            last_failed_wal: Some("000000010000000000000042".to_owned()),
+            last_failed_time: Some(failed_at),
+        };
+        let h = PrimaryHealthBuilder::new().with_archiver(stats).build();
+        let mut verdict = Verdict::default();
+
+        check_archive(&primary_node(h), &mut verdict);
+
+        assert!(has_verdict(
+            &verdict,
+            &NodeVerdict::ArchiveLagging {
+                failed_count: 0,
+                last_wal: None,
+                last_failed_at: None,
+                last_archived_at: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn check_archive_silent_when_last_archive_newer_than_last_failure() {
+        let failed_at = chrono::Utc::now() - Duration::hours(2);
+        let archived_at = chrono::Utc::now() - Duration::minutes(2);
+        let stats = ArchiverStats {
+            archived_count: 100,
+            failed_count: 3,
+            last_archived_wal: Some("000000010000000000000042".to_owned()),
+            last_archived_time: Some(archived_at),
+            last_failed_wal: Some("000000010000000000000040".to_owned()),
+            last_failed_time: Some(failed_at),
+        };
+        let h = PrimaryHealthBuilder::new().with_archiver(stats).build();
         let mut verdict = Verdict::default();
 
         check_archive(&primary_node(h), &mut verdict);
