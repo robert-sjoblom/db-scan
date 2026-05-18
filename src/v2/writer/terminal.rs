@@ -6,6 +6,10 @@ use super::{
     view::{ClusterView, RESET, RenderMode},
 };
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "branching on disk column doubles row/header writes"
+)]
 pub(crate) fn render_table(views: &[ClusterView], options: &WriterOptions) -> String {
     if views.is_empty() {
         return "No clusters to display.".to_owned();
@@ -46,21 +50,37 @@ pub(crate) fn render_table(views: &[ClusterView], options: &WriterOptions) -> St
 
     let mut output = String::new();
 
-    let _ = writeln!(
-        output,
-        "{:<8} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {:<width_disk$} REASON",
-        "STATUS",
-        "CLUSTER",
-        "PRIMARY",
-        "REPLICAS",
-        "LAG",
-        "DISK",
-        width_cluster = max_cluster,
-        width_primary = max_primary,
-        width_replicas = max_replicas,
-        width_lag = max_lag,
-        width_disk = max_disk
-    );
+    if has_disk_info {
+        let _ = writeln!(
+            output,
+            "{:<8} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {:<width_disk$} REASON",
+            "STATUS",
+            "CLUSTER",
+            "PRIMARY",
+            "REPLICAS",
+            "LAG",
+            "DISK",
+            width_cluster = max_cluster,
+            width_primary = max_primary,
+            width_replicas = max_replicas,
+            width_lag = max_lag,
+            width_disk = max_disk
+        );
+    } else {
+        let _ = writeln!(
+            output,
+            "{:<8} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} REASON",
+            "STATUS",
+            "CLUSTER",
+            "PRIMARY",
+            "REPLICAS",
+            "LAG",
+            width_cluster = max_cluster,
+            width_primary = max_primary,
+            width_replicas = max_replicas,
+            width_lag = max_lag,
+        );
+    }
 
     for (i, view) in views.iter().enumerate() {
         let status_str = if use_color {
@@ -78,23 +98,41 @@ pub(crate) fn render_table(views: &[ClusterView], options: &WriterOptions) -> St
         let primary_str = &primary_strs[i];
         let replicas_str = &replicas_strs[i];
 
-        let _ = writeln!(
-            output,
-            "{:<status_padding$} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {:<width_disk$} {}",
-            status_str,
-            view.name,
-            primary_str,
-            replicas_str,
-            format_lag(view.lag_bytes),
-            view.disk,
-            view.reason.short,
-            status_padding = status_padding,
-            width_cluster = max_cluster,
-            width_primary = max_primary,
-            width_replicas = max_replicas,
-            width_lag = max_lag,
-            width_disk = max_disk
-        );
+        if has_disk_info {
+            let _ = writeln!(
+                output,
+                "{:<status_padding$} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {:<width_disk$} {}",
+                status_str,
+                view.name,
+                primary_str,
+                replicas_str,
+                format_lag(view.lag_bytes),
+                view.disk,
+                view.reason.short,
+                status_padding = status_padding,
+                width_cluster = max_cluster,
+                width_primary = max_primary,
+                width_replicas = max_replicas,
+                width_lag = max_lag,
+                width_disk = max_disk
+            );
+        } else {
+            let _ = writeln!(
+                output,
+                "{:<status_padding$} {:<width_cluster$} {:<width_primary$} {:<width_replicas$} {:<width_lag$} {}",
+                status_str,
+                view.name,
+                primary_str,
+                replicas_str,
+                format_lag(view.lag_bytes),
+                view.reason.short,
+                status_padding = status_padding,
+                width_cluster = max_cluster,
+                width_primary = max_primary,
+                width_replicas = max_replicas,
+                width_lag = max_lag,
+            );
+        }
     }
 
     if has_sigils || has_disk_info {

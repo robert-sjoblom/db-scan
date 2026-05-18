@@ -34,7 +34,6 @@ pub(crate) struct DbScanConfig {
     pub(crate) watch: Option<u64>,
     pub(crate) ssh_user: Option<String>,
     pub(crate) check_disks: bool,
-    pub(crate) disk_check_window_minutes: u64,
     pub(crate) max_concurrency: usize,
     pub(crate) database_portal_url: String,
 }
@@ -122,11 +121,6 @@ pub(crate) struct CliArgs {
     #[arg(long)]
     pub(crate) check_disks: bool,
 
-    /// Recency window in minutes for dmesg entries to count against health.
-    /// Older entries are ignored.
-    #[arg(long, env = "DISK_CHECK_WINDOW_MINUTES")]
-    pub(crate) disk_check_window_minutes: Option<u64>,
-
     /// Maximum number of nodes scanned concurrently. Higher values finish faster
     /// but can saturate shared SSH/Postgres targets and cause spurious failures.
     #[arg(long, env = "DB_SCAN_MAX_CONCURRENCY")]
@@ -144,8 +138,6 @@ struct FileConfig {
     ssh: SshFile,
     #[serde(default)]
     display: DisplayFile,
-    #[serde(default)]
-    disk_check: DiskCheckFile,
     #[serde(default)]
     scan: ScanFile,
     #[serde(default)]
@@ -185,12 +177,6 @@ struct SshFile {
 struct DisplayFile {
     log_level: Option<String>,
     no_color: Option<bool>,
-}
-
-#[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
-struct DiskCheckFile {
-    window_minutes: Option<u64>,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -265,10 +251,6 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         EnvFilter::try_new(&log_level_str).context("parsing log_level as tracing EnvFilter")?;
     let no_color = cli.no_color || file.display.no_color.unwrap_or(false);
     let ssh_user = cli.ssh_user.or(file.ssh.user);
-    let disk_check_window_minutes = cli
-        .disk_check_window_minutes
-        .or(file.disk_check.window_minutes)
-        .unwrap_or(60);
     let max_concurrency = cli
         .max_concurrency
         .or(file.scan.max_concurrency)
@@ -297,7 +279,6 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         watch: cli.watch,
         ssh_user,
         check_disks: cli.check_disks,
-        disk_check_window_minutes,
         max_concurrency,
         database_portal_url,
     })
