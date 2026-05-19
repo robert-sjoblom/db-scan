@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-05-19). Incorporates two rounds of agent review.
+Proposed (2026-05-19). Incorporates five rounds of agent review.
 
 ## Context
 
