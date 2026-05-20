@@ -86,3 +86,45 @@ jobs:
 
       - name: Run audit
         run: cargo audit
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    needs: check
+    # Run on main push, scheduled, or when PR title contains [coverage]
+    if: >-
+      github.event_name == 'push'
+      || github.event_name == 'schedule'
+      || contains(github.event.pull_request.title, '[coverage]')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: baptiste0928/cargo-install@v3
+        with:
+          crate: cargo-llvm-cov
+          locked: true
+
+      - name: Install cargo-nextest
+        uses: baptiste0928/cargo-install@v3
+        with:
+          crate: cargo-nextest
+          locked: true
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate coverage
+        run: cargo llvm-cov nextest --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
