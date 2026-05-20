@@ -20,6 +20,7 @@ use crate::{
 #[cfg_attr(test, derive(Clone))]
 pub struct ReplicaHealthCheckResult {
     pub timeline_id: i32,
+    pub system_identifier: String,
     pub wal_receiver: Option<WalReceiverInfo>,
     pub lag: LagInfo,
     pub conflicts_by_db: HashMap<String, i32>,
@@ -55,6 +56,7 @@ pub struct LagInfo {
 
 static HEALTH_CHECK_REPLICA_QUERY: &str = "SELECT jsonb_build_object(
     'timeline_id', (SELECT timeline_id FROM pg_control_checkpoint()),
+    'system_identifier', (SELECT system_identifier::text FROM pg_control_system()),
     'wal_receiver', (
         SELECT COALESCE(to_jsonb(t), '{}'::jsonb)
         FROM (

@@ -964,16 +964,14 @@ mod cluster_state_tests {
         config.insert("synchronous_standby_names".to_owned(), String::new());
 
         // Replica health with no wal_receiver (disconnected)
-        let disconnected_replica = ReplicaHealthCheckResult {
-            timeline_id: 18,
-            wal_receiver: None,
-            lag: LagInfo {
+        let disconnected_replica = ReplicaHealthBuilder::new()
+            .with_timeline(18)
+            .without_wal_receiver()
+            .with_lag(LagInfo {
                 apply_lag_bytes: Some(0x0002_0000),
                 last_transaction_replay_at: Some(Utc::now()),
-            },
-            conflicts_by_db: HashMap::new(),
-            configuration: HashMap::new(),
-        };
+            })
+            .build();
 
         let cluster = make_cluster(vec![
             make_node(

@@ -61,6 +61,7 @@ pub(crate) mod tests_common {
 
     pub struct PrimaryHealthBuilder {
         replication_count: usize,
+        system_identfier: String,
         replay_lag: Option<String>,
         configuration: HashMap<String, String>,
         timeline_id: i32,
@@ -78,6 +79,7 @@ pub(crate) mod tests_common {
             configuration.insert("archive_mode".to_owned(), "on".to_owned());
             Self {
                 replication_count: 0,
+                system_identfier: "6968745321024393216".to_owned(),
                 replay_lag: None,
                 configuration,
                 timeline_id: 11,
@@ -126,6 +128,11 @@ pub(crate) mod tests_common {
             self
         }
 
+        pub fn with_system_identifier(mut self, identifier: &str) -> Self {
+            self.system_identfier = identifier.to_owned();
+            self
+        }
+
         pub fn build(self) -> PrimaryHealthCheckResult {
             let base_lsn = "48F/6957B540";
             let has_high_lag = self
@@ -166,6 +173,7 @@ pub(crate) mod tests_common {
 
             PrimaryHealthCheckResult {
                 timeline_id: self.timeline_id,
+                system_identifier: self.system_identfier,
                 uptime: "26 days 14:39:06.703824".to_owned(),
                 current_wal_lsn: base_lsn.to_owned(),
                 configuration: self.configuration,
@@ -196,6 +204,8 @@ pub(crate) mod tests_common {
 
     pub struct ReplicaHealthBuilder {
         timeline_id: i32,
+        system_identifier: String,
+        lag: LagInfo,
         sender_host: String,
         has_wal_receiver: bool,
     }
@@ -204,6 +214,11 @@ pub(crate) mod tests_common {
         pub fn new() -> Self {
             Self {
                 timeline_id: 11,
+                system_identifier: "6968745321024393216".to_owned(),
+                lag: LagInfo {
+                    apply_lag_bytes: Some(0),
+                    last_transaction_replay_at: Some(Utc::now()),
+                },
                 sender_host: "127.1.12.151".to_owned(),
                 has_wal_receiver: true,
             }
@@ -214,6 +229,11 @@ pub(crate) mod tests_common {
             self
         }
 
+        pub fn with_system_identifier(mut self, system_identifier: &str) -> Self {
+            self.system_identifier = system_identifier.to_owned();
+            self
+        }
+
         pub fn with_sender_host(mut self, host: &str) -> Self {
             self.sender_host = host.to_owned();
             self
@@ -221,6 +241,11 @@ pub(crate) mod tests_common {
 
         pub fn without_wal_receiver(mut self) -> Self {
             self.has_wal_receiver = false;
+            self
+        }
+
+        pub fn with_lag(mut self, lag: LagInfo) -> Self {
+            self.lag = lag;
             self
         }
 
@@ -249,11 +274,9 @@ pub(crate) mod tests_common {
 
             ReplicaHealthCheckResult {
                 timeline_id: self.timeline_id,
+                system_identifier: self.system_identifier,
                 wal_receiver,
-                lag: LagInfo {
-                    apply_lag_bytes: Some(0),
-                    last_transaction_replay_at: Some(Utc::now()),
-                },
+                lag: self.lag,
                 conflicts_by_db: HashMap::new(),
                 configuration: HashMap::new(),
             }
