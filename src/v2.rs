@@ -35,30 +35,6 @@ pub(crate) mod tests_common {
         }
     }
 
-    pub mod unhealthy {
-        static DB001_UNREACHABLE_FAILOVER_WITH_REPLICA_JSON: &str = include_str!(
-            "../tests/fixtures/unhealthy/DB001_UNREACHABLE_FAILOVER_WITH_REPLICA.json"
-        );
-        static DB001_REBUILDING_AFTER_FAILOVER_JSON: &str =
-            include_str!("../tests/fixtures/unhealthy/DB001_REBUILDING_AFTER_FAILOVER.json");
-        static CHAINED_REPLICA_JSON: &str =
-            include_str!("../tests/fixtures/unhealthy/CHAINED_REPLICA.json");
-
-        use crate::v2::cluster::Cluster;
-
-        pub fn db001_unreachable_failover_with_replica() -> Cluster {
-            serde_json::from_str::<Cluster>(DB001_UNREACHABLE_FAILOVER_WITH_REPLICA_JSON).unwrap()
-        }
-
-        pub fn db001_rebuilding_after_failover() -> Cluster {
-            serde_json::from_str::<Cluster>(DB001_REBUILDING_AFTER_FAILOVER_JSON).unwrap()
-        }
-
-        pub fn chained_replica() -> Cluster {
-            serde_json::from_str::<Cluster>(CHAINED_REPLICA_JSON).unwrap()
-        }
-    }
-
     pub struct PrimaryHealthBuilder {
         replication_count: usize,
         system_identfier: String,
@@ -128,7 +104,7 @@ pub(crate) mod tests_common {
             self
         }
 
-        pub fn with_system_identifier(mut self, identifier: &str) -> Self {
+        pub fn _with_system_identifier(mut self, identifier: &str) -> Self {
             self.system_identfier = identifier.to_owned();
             self
         }
@@ -229,7 +205,7 @@ pub(crate) mod tests_common {
             self
         }
 
-        pub fn with_system_identifier(mut self, system_identifier: &str) -> Self {
+        pub fn _with_system_identifier(mut self, system_identifier: &str) -> Self {
             self.system_identifier = system_identifier.to_owned();
             self
         }
@@ -297,7 +273,6 @@ pub(crate) mod tests_common {
         role: Role,
     }
 
-    #[expect(dead_code, reason = "test code only")]
     impl NodeBuilder {
         pub fn new(name: &str) -> Self {
             Self {

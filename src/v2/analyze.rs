@@ -359,12 +359,15 @@ fn get_timeline(node: &AnalyzedNode) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::tests_common::{healthy, unhealthy};
+    use crate::v2::tests_common::{
+        ClusterBuilder, NodeBuilder, PrimaryHealthBuilder, ReplicaHealthBuilder, healthy,
+    };
 
     use pretty_assertions::assert_eq;
 
     #[test]
     fn test_healthy_cluster() {
+        // Uses the canonical JSON fixture as serde/schema coverage for Cluster.
         let cluster = healthy::non_failover_cluster();
 
         let actual = classify::classify(analyze(cluster));
@@ -383,7 +386,23 @@ mod tests {
 
     #[test]
     fn test_degraded_cluster_one_replica_down() {
-        let cluster = unhealthy::db001_unreachable_failover_with_replica();
+        // Primary streams to one replica; a third node is unreachable.
+        let primary = NodeBuilder::new("dev-pg-app001-db001.sto1.example.com")
+            .with_id(1)
+            .with_primary(PrimaryHealthBuilder::new().with_replication(1).build())
+            .build();
+        let replica = NodeBuilder::new("dev-pg-app001-db002.sto2.example.com")
+            .with_id(2)
+            .with_replica(ReplicaHealthBuilder::new().build())
+            .build();
+        let unknown = NodeBuilder::new("dev-pg-app001-db003.sto3.example.com")
+            .with_id(3)
+            .with_unknown()
+            .build();
+        let cluster = ClusterBuilder::new("dev-pg-app001")
+            .with_nodes(vec![primary, replica, unknown])
+            .build();
+
         let actual = classify::classify(analyze(cluster));
 
         assert!(
@@ -400,9 +419,24 @@ mod tests {
 
     #[test]
     fn test_degraded_cluster_rebuilding_replica() {
-        // Scenario: db002 is primary (failover occurred), db003 is streaming replica,
-        // db001 is online but rebuilding (wal_receiver = None, old last_transaction_replay_at)
-        let cluster = unhealthy::db001_rebuilding_after_failover();
+        // Primary streams to one replica; another replica has no WAL receiver
+        // (online but rebuilding).
+        let primary = NodeBuilder::new("dev-pg-app001-db001.sto1.example.com")
+            .with_id(1)
+            .with_primary(PrimaryHealthBuilder::new().with_replication(1).build())
+            .build();
+        let streaming = NodeBuilder::new("dev-pg-app001-db002.sto2.example.com")
+            .with_id(2)
+            .with_replica(ReplicaHealthBuilder::new().build())
+            .build();
+        let rebuilding = NodeBuilder::new("dev-pg-app001-db003.sto3.example.com")
+            .with_id(3)
+            .with_replica(ReplicaHealthBuilder::new().without_wal_receiver().build())
+            .build();
+        let cluster = ClusterBuilder::new("dev-pg-app001")
+            .with_nodes(vec![primary, streaming, rebuilding])
+            .build();
+
         let actual = classify::classify(analyze(cluster));
 
         assert!(
@@ -419,8 +453,29 @@ mod tests {
 
     #[test]
     fn test_degraded_cluster_chained_replica() {
-        // Scenario: db001 is primary, db002 replicates from db001, db003 replicates from db002 (chained)
-        let cluster = unhealthy::chained_replica();
+        // db002 streams from db001 (primary); db003 streams from db002 (chained).
+        let primary = NodeBuilder::new("dev-pg-app001-db001.sto1.example.com")
+            .with_id(1)
+            .with_primary(PrimaryHealthBuilder::new().with_replication(1).build())
+            .build();
+        let primary_ip = primary.ip_address.to_string();
+        let r1 = NodeBuilder::new("dev-pg-app001-db002.sto2.example.com")
+            .with_id(2)
+            .with_replica(
+                ReplicaHealthBuilder::new()
+                    .with_sender_host(&primary_ip)
+                    .build(),
+            )
+            .build();
+        let r1_ip = r1.ip_address.to_string();
+        let r2 = NodeBuilder::new("dev-pg-app001-db003.sto3.example.com")
+            .with_id(3)
+            .with_replica(ReplicaHealthBuilder::new().with_sender_host(&r1_ip).build())
+            .build();
+        let cluster = ClusterBuilder::new("dev-pg-app001")
+            .with_nodes(vec![primary, r1, r2])
+            .build();
+
         let actual = classify::classify(analyze(cluster));
 
         assert!(
