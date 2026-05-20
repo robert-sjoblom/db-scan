@@ -16,6 +16,8 @@ use crate::{
     },
 };
 
+mod timeline_history;
+
 /// Per-replica WAL sender state from `pg_stat_replication.state`.
 ///
 /// Values mirror those Postgres exposes; `Unknown` is a forward-compat catch-all
@@ -106,8 +108,10 @@ pub struct ReplicationSlot {
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[cfg_attr(test, derive(Clone))]
 pub struct PrimaryHealthCheckResult {
-    pub timeline_id: i32,
     pub system_identifier: String,
+    pub timeline_id: i32,
+    #[serde(default)]
+    pub timeline_history: Option<String>,
     pub uptime: String,
     pub current_wal_lsn: String,
     pub configuration: HashMap<String, String>,
@@ -142,8 +146,20 @@ pub struct ReplicationConnection {
     pub reply_time: Option<DateTime<Utc>>,
 }
 
-static HEALTH_CHECK_PRIMARY_QUERY: &str = "SELECT jsonb_build_object(
-    'timeline_id', (SELECT timeline_id FROM pg_control_checkpoint()),
+static HEALTH_CHECK_PRIMARY_QUERY: &str = "
+WITH cc AS (SELECT timeline_id FROM pg_control_checkpoint())
+SELECT jsonb_build_object(
+    'timeline_id', (SELECT timeline_id FROM cc),
+    'timeline_history', (
+        SELECT CASE
+            WHEN timeline_id = 1 THEN NULL
+            ELSE pg_read_file(
+                'pg_wal/' || lpad(upper(to_hex(timeline_id)), 8, '0') || '.history',
+                0, (1024 * 1024)::bigint, true
+            )
+        END
+        FROM cc
+    ),
     'system_identifier', (SELECT system_identifier::text FROM pg_control_system()),
     'uptime', (SELECT (now() - pg_postmaster_start_time())::text),
     'current_wal_lsn', (SELECT pg_current_wal_lsn()::text),
