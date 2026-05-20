@@ -13,6 +13,7 @@
                 "primary": {
                     "health": {
                         "timeline_id": 11,
+                        "system_identifier": "6968745321024393216",
                         "uptime": "26 days 14:39:06.703824",
                         "current_wal_lsn": "48F/6957B540",
                         "configuration": {
@@ -72,6 +73,7 @@
                 "replica": {
                     "health": {
                         "timeline_id": 11,
+                        "system_identifier": "6968745321024393216",
                         "wal_receiver": {
                             "pid": 4053449,
                             "status": "streaming",
@@ -115,6 +117,7 @@
                 "replica": {
                     "health": {
                         "timeline_id": 11,
+                        "system_identifier": "6968745321024393216",
                         "wal_receiver": {
                             "pid": 1856242,
                             "status": "streaming",

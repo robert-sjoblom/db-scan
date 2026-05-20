@@ -107,6 +107,7 @@ pub struct ReplicationSlot {
 #[cfg_attr(test, derive(Clone))]
 pub struct PrimaryHealthCheckResult {
     pub timeline_id: i32,
+    pub system_identifier: String,
     pub uptime: String,
     pub current_wal_lsn: String,
     pub configuration: HashMap<String, String>,
@@ -143,6 +144,7 @@ pub struct ReplicationConnection {
 
 static HEALTH_CHECK_PRIMARY_QUERY: &str = "SELECT jsonb_build_object(
     'timeline_id', (SELECT timeline_id FROM pg_control_checkpoint()),
+    'system_identifier', (SELECT system_identifier::text FROM pg_control_system()),
     'uptime', (SELECT (now() - pg_postmaster_start_time())::text),
     'current_wal_lsn', (SELECT pg_current_wal_lsn()::text),
     'configuration', (
