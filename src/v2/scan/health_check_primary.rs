@@ -110,7 +110,6 @@ pub struct ReplicationSlot {
 pub struct PrimaryHealthCheckResult {
     pub system_identifier: String,
     pub timeline_id: i32,
-    #[serde(default)]
     pub timeline_history: Option<String>,
     pub uptime: String,
     pub current_wal_lsn: String,

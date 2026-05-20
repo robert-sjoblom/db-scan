@@ -14,6 +14,8 @@
                     "health": {
                         "timeline_id": 11,
                         "system_identifier": "6968745321024393216",
+                        "current_time": "2025-09-20T18:57:24.600000Z",
+                        "timeline_history": "1\t0/3000000\tno recovery target specified\n2\t0/5000000\tno recovery target specified\n3\t0/9000000\tno recovery target specified\n4\t0/F000000\tno recovery target specified\n5\t1/2000000\tno recovery target specified\n6\t1/7000000\tno recovery target specified\n7\t2/1000000\tno recovery target specified\n8\t2/8000000\tno recovery target specified\n9\t3/4000000\tno recovery target specified\n10\t3/E000000\tno recovery target specified\n",
                         "uptime": "26 days 14:39:06.703824",
                         "current_wal_lsn": "48F/6957B540",
                         "configuration": {
