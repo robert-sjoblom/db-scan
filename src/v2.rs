@@ -38,6 +38,7 @@ pub(crate) mod tests_common {
     pub struct PrimaryHealthBuilder {
         replication_count: usize,
         system_identfier: String,
+        timeline_history: Option<String>,
         replay_lag: Option<String>,
         configuration: HashMap<String, String>,
         timeline_id: i32,
@@ -56,6 +57,7 @@ pub(crate) mod tests_common {
             Self {
                 replication_count: 0,
                 system_identfier: "6968745321024393216".to_owned(),
+                timeline_history: None,
                 replay_lag: None,
                 configuration,
                 timeline_id: 11,
@@ -109,6 +111,11 @@ pub(crate) mod tests_common {
             self
         }
 
+        pub fn with_timeline_history(mut self, timeline_history: &str) -> Self {
+            self.timeline_history = Some(timeline_history.to_owned());
+            self
+        }
+
         pub fn build(self) -> PrimaryHealthCheckResult {
             let base_lsn = "48F/6957B540";
             let has_high_lag = self
@@ -150,6 +157,7 @@ pub(crate) mod tests_common {
             PrimaryHealthCheckResult {
                 timeline_id: self.timeline_id,
                 system_identifier: self.system_identfier,
+                timeline_history: self.timeline_history,
                 uptime: "26 days 14:39:06.703824".to_owned(),
                 current_wal_lsn: base_lsn.to_owned(),
                 configuration: self.configuration,
