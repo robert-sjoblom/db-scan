@@ -518,6 +518,7 @@ mod cluster_state_tests {
 
     use super::*;
     use crate::v2::{
+        analyze::split_brain::Confidence,
         cluster::Cluster,
         scan::{
             AnalyzedNode, Role,
@@ -1308,6 +1309,8 @@ mod cluster_state_tests {
                         "dev-pg-app001-db003.sto3.example.com".to_owned(),
                     ],
                 },
+                confidence: Confidence::BestEffort,
+                findings: vec![],
             })),
         );
     }
