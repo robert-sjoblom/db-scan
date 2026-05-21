@@ -98,6 +98,7 @@
                     "health": {
                         "timeline_id": 11,
                         "system_identifier": "6968745321024393216",
+                        "current_time": "2025-09-20T18:57:24.600000Z",
                         "wal_receiver": {
                             "pid": 4053449,
                             "status": "streaming",
@@ -142,6 +143,7 @@
                     "health": {
                         "timeline_id": 11,
                         "system_identifier": "6968745321024393216",
+                        "current_time": "2025-09-20T18:57:24.600000Z",
                         "wal_receiver": {
                             "pid": 1856242,
                             "status": "streaming",

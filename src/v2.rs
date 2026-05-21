@@ -10,7 +10,7 @@ pub mod writer;
 pub(crate) mod tests_common {
     use std::{collections::HashMap, net::Ipv4Addr};
 
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
 
     use crate::v2::{
         cluster::Cluster,
@@ -36,6 +36,7 @@ pub(crate) mod tests_common {
     }
 
     pub struct PrimaryHealthBuilder {
+        current_time: DateTime<Utc>,
         replication_count: usize,
         system_identfier: String,
         timeline_history: Option<String>,
@@ -55,6 +56,7 @@ pub(crate) mod tests_common {
             let mut configuration = HashMap::new();
             configuration.insert("archive_mode".to_owned(), "on".to_owned());
             Self {
+                current_time: DateTime::<Utc>::UNIX_EPOCH,
                 replication_count: 0,
                 system_identfier: "6968745321024393216".to_owned(),
                 timeline_history: None,
@@ -155,6 +157,7 @@ pub(crate) mod tests_common {
                 .collect();
 
             PrimaryHealthCheckResult {
+                current_time: self.current_time,
                 timeline_id: self.timeline_id,
                 system_identifier: self.system_identfier,
                 timeline_history: self.timeline_history,
@@ -187,6 +190,7 @@ pub(crate) mod tests_common {
     }
 
     pub struct ReplicaHealthBuilder {
+        current_time: DateTime<Utc>,
         timeline_id: i32,
         system_identifier: String,
         lag: LagInfo,
@@ -197,6 +201,7 @@ pub(crate) mod tests_common {
     impl ReplicaHealthBuilder {
         pub fn new() -> Self {
             Self {
+                current_time: DateTime::<Utc>::UNIX_EPOCH,
                 timeline_id: 11,
                 system_identifier: "6968745321024393216".to_owned(),
                 lag: LagInfo {
@@ -257,6 +262,7 @@ pub(crate) mod tests_common {
             };
 
             ReplicaHealthCheckResult {
+                current_time: self.current_time,
                 timeline_id: self.timeline_id,
                 system_identifier: self.system_identifier,
                 wal_receiver,
