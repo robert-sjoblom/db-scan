@@ -243,7 +243,7 @@ fn build_split_brain_replicas(info: &SplitBrainInfo) -> ReplicasView {
             replicas_following_true,
             ..
         }
-        | SplitBrainResolution::ReplicaOverridesTimeline {
+        | SplitBrainResolution::LowerTimelineHasQuorum {
             replicas_following_true,
             ..
         } => {
@@ -543,7 +543,7 @@ fn format_reason(reason: &Reason, verdict: &Verdict) -> (String, String) {
                     "timeline {} > {} + replica",
                     true_primary_timeline, stale_timeline
                 ),
-                SplitBrainResolution::ReplicaOverridesTimeline {
+                SplitBrainResolution::LowerTimelineHasQuorum {
                     true_primary_timeline,
                     stale_timeline,
                     ..

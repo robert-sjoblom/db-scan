@@ -25,7 +25,7 @@ pub enum SplitBrainResolution {
     },
     /// Replica evidence overrides timeline - replicas are following a lower-timeline primary
     /// This indicates the higher-timeline primary was likely isolated after promotion.
-    ReplicaOverridesTimeline {
+    LowerTimelineHasQuorum {
         true_primary_timeline: i32,
         stale_timeline: i32,
         replicas_following_true: Vec<String>,
@@ -236,7 +236,7 @@ fn resolve_with_different_timelines(
         SplitBrainInfo {
             true_primary: stale_node.node_name.clone(),
             stale_primaries: vec![highest_tl_node.node_name.clone()],
-            resolution: SplitBrainResolution::ReplicaOverridesTimeline {
+            resolution: SplitBrainResolution::LowerTimelineHasQuorum {
                 true_primary_timeline: stale_tl,
                 stale_timeline: highest_tl,
                 replicas_following_true: replicas_following_stale,
@@ -428,7 +428,7 @@ mod tests {
             SplitBrainInfo {
                 true_primary: "db001".to_owned(),
                 stale_primaries: vec!["db002".to_owned()],
-                resolution: SplitBrainResolution::ReplicaOverridesTimeline {
+                resolution: SplitBrainResolution::LowerTimelineHasQuorum {
                     true_primary_timeline: 11,
                     stale_timeline: 12,
                     replicas_following_true: vec!["db003".to_owned()],
