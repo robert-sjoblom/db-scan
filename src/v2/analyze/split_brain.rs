@@ -57,6 +57,59 @@ pub struct SplitBrainInfo {
     pub stale_primaries: Vec<String>,
     /// How the true primary was determined.
     pub resolution: SplitBrainResolution,
+    pub confidence: Confidence,
+    pub findings: Vec<SplitBrainFinding>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum Confidence {
+    BestEffort,
+    Conflicting,
+    Refuse,
+}
+
+/// Structured finding attached to a split-brain resolution.
+/// Categories defined in ADR-002 §4.
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum SplitBrainFinding {
+    SystemIdentifierMismatch {
+        nodes: Vec<String>,
+    },
+    SynchronousCommitWeakened {
+        primary: String,
+        value: String,
+    },
+    SyncStandbyNamesDiverged {
+        primaries: Vec<String>,
+    },
+    ReplicaWalReceiverStale {
+        replica: String,
+        claimed_sender: String,
+    },
+    PrimaryDoesNotSeeReplica {
+        primary: String,
+        replica: String,
+    },
+    BidirectionalFlushingConfirmed {
+        primary: String,
+        replica: String,
+    },
+    ReplicaInCatchup {
+        replica: String,
+        primary: String,
+    },
+    PrimaryQuorumUnsatisfied {
+        primary: String,
+        required: u32,
+        observed: u32,
+    },
+    DivergentReplicaWal {
+        replica_node: String,
+        replica_received_tli: i32,
+        replica_flushed_lsn: String,
+        fork_tli: i32,
+        fork_lsn: String,
+    },
 }
 
 /// Resolve a split-brain scenario by determining the true primary.
@@ -193,6 +246,8 @@ fn determine_true_primary(
             true_primary: timeline_info.highest_timeline_node.node_name.clone(),
             stale_primaries,
             resolution: SplitBrainResolution::Indeterminate,
+            confidence: Confidence::BestEffort,
+            findings: vec![],
         }
     }
 }
@@ -241,6 +296,8 @@ fn resolve_with_different_timelines(
                 stale_timeline: highest_tl,
                 replicas_following_true: replicas_following_stale,
             },
+            confidence: Confidence::BestEffort,
+            findings: vec![],
         }
     } else if !replicas_following_highest.is_empty() {
         // Both timeline and replica evidence agree
@@ -258,6 +315,8 @@ fn resolve_with_different_timelines(
                 stale_timeline: stale_tl,
                 replicas_following_true: replicas_following_highest,
             },
+            confidence: Confidence::BestEffort,
+            findings: vec![],
         }
     } else {
         // No replica evidence - trust timeline
@@ -274,6 +333,8 @@ fn resolve_with_different_timelines(
                 true_primary_timeline: highest_tl,
                 stale_timeline: stale_tl,
             },
+            confidence: Confidence::BestEffort,
+            findings: vec![],
         }
     }
 }
@@ -313,6 +374,8 @@ fn resolve_with_equal_timelines(
             resolution: SplitBrainResolution::ReplicaFollowing {
                 replicas_following_true: followers_list,
             },
+            confidence: Confidence::BestEffort,
+            findings: vec![],
         }
     } else {
         // Cannot determine - mark first as "true" but resolution is indeterminate
@@ -328,6 +391,8 @@ fn resolve_with_equal_timelines(
             true_primary: first.node_name.clone(),
             stale_primaries,
             resolution: SplitBrainResolution::Indeterminate,
+            confidence: Confidence::BestEffort,
+            findings: vec![],
         }
     }
 }
@@ -383,6 +448,8 @@ mod tests {
                     true_primary_timeline: 12,
                     stale_timeline: 11,
                 },
+                confidence: Confidence::BestEffort,
+                findings: vec![],
             }
         );
     }
@@ -407,6 +474,8 @@ mod tests {
                     stale_timeline: 11,
                     replicas_following_true: vec!["db003".to_owned()],
                 },
+                confidence: Confidence::BestEffort,
+                findings: vec![],
             }
         );
     }
@@ -433,6 +502,8 @@ mod tests {
                     stale_timeline: 12,
                     replicas_following_true: vec!["db003".to_owned()],
                 },
+                confidence: Confidence::BestEffort,
+                findings: vec![],
             }
         );
     }
@@ -455,6 +526,8 @@ mod tests {
                 resolution: SplitBrainResolution::ReplicaFollowing {
                     replicas_following_true: vec!["db003".to_owned()],
                 },
+                confidence: Confidence::BestEffort,
+                findings: vec![],
             }
         );
     }
@@ -499,7 +572,9 @@ mod tests {
                 true_primary: "db001".to_owned(),
                 stale_primaries: vec!["db002".to_owned()],
                 resolution: SplitBrainResolution::Indeterminate,
-            }
+                confidence: Confidence::BestEffort,
+                findings: vec![],
+            },
         );
     }
 

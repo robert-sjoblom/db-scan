@@ -98,7 +98,7 @@ mod tests {
 
     use crate::v2::analyze::{
         ClusterVerdict, NodeVerdict, Reason, SplitBrainResolution, Tier,
-        split_brain::SplitBrainInfo,
+        split_brain::{Confidence, SplitBrainInfo},
     };
 
     // Reasons are picked via `max()` in classify, so PartialOrd defines the
@@ -154,6 +154,8 @@ mod tests {
             true_primary: "n1".into(),
             stale_primaries: vec!["n2".into()],
             resolution: SplitBrainResolution::Indeterminate,
+            confidence: Confidence::BestEffort,
+            findings: vec![],
         };
         assert_eq!(
             Reason::from(&ClusterVerdict::SplitBrain(info)),
