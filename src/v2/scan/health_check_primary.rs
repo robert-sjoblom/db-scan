@@ -108,6 +108,7 @@ pub struct ReplicationSlot {
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[cfg_attr(test, derive(Clone))]
 pub struct PrimaryHealthCheckResult {
+    pub current_time: DateTime<Utc>,
     pub system_identifier: String,
     pub timeline_id: i32,
     pub timeline_history: Option<String>,
