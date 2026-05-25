@@ -37,6 +37,7 @@ pub(crate) struct DbScanConfig {
     pub(crate) check_disks: bool,
     pub(crate) max_concurrency: usize,
     pub(crate) database_portal_url: String,
+    pub(crate) capture: Option<CaptureFile>,
 }
 
 /// A tool to scan `PostgreSQL` clusters for configuration and health.
@@ -147,6 +148,24 @@ struct FileConfig {
     scan: ScanFile,
     #[serde(default)]
     database_portal: DatabasePortalFile,
+    #[serde(default)]
+    capture: Option<CaptureFile>,
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
+struct CaptureFile {
+    enabled: bool,
+    postgres: PostgresCapture,
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
+struct PostgresCapture {
+    host: String,
+    port: u16,
+    dbname: String,
+    user: String,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -266,6 +285,7 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         .database_portal
         .url
         .ok_or_else(|| anyhow!("database_portal.url not set in config"))?;
+    let capture = file.capture;
 
     let config = DbScanConfig {
         print_config: cli.print_config,
@@ -288,6 +308,7 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         check_disks: cli.check_disks,
         max_concurrency,
         database_portal_url,
+        capture,
     };
 
     Ok(config)
