@@ -1,10 +1,11 @@
-use std::{fs, path::PathBuf, sync::OnceLock};
+use std::{fs, path::PathBuf, sync::OnceLock, time::Duration};
 
 use anyhow::{Context as _, anyhow};
 use clap::Parser;
 use redact::Secret;
 use regex_lite::Regex;
 use serde::Deserialize;
+use tokio_postgres::config::SslMode;
 use tracing_subscriber::EnvFilter;
 
 pub(crate) static CONFIG: OnceLock<DbScanConfig> = OnceLock::new();
@@ -38,6 +39,28 @@ pub(crate) struct DbScanConfig {
     pub(crate) max_concurrency: usize,
     pub(crate) database_portal_url: String,
     pub(crate) capture: Option<CaptureFile>,
+}
+
+impl DbScanConfig {
+    pub fn capture_cfg(&self) -> Option<tokio_postgres::Config> {
+        let Some(pg_cfg) = &self.capture else {
+            return None;
+        };
+
+        if !pg_cfg.enabled {
+            return None;
+        }
+
+        let mut cfg = tokio_postgres::Config::new();
+        cfg.host(&pg_cfg.postgres.host)
+            .port(pg_cfg.postgres.port)
+            .dbname(&pg_cfg.postgres.dbname)
+            .user(&pg_cfg.postgres.user)
+            .ssl_mode(SslMode::Require)
+            .connect_timeout(Duration::from_secs(5));
+
+        Some(cfg)
+    }
 }
 
 /// A tool to scan `PostgreSQL` clusters for configuration and health.
@@ -154,18 +177,18 @@ struct FileConfig {
 
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
-struct CaptureFile {
-    enabled: bool,
-    postgres: PostgresCapture,
+pub(crate) struct CaptureFile {
+    pub(crate) enabled: bool,
+    pub(crate) postgres: PostgresCapture,
 }
 
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
-struct PostgresCapture {
-    host: String,
-    port: u16,
-    dbname: String,
-    user: String,
+pub(crate) struct PostgresCapture {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) dbname: String,
+    pub(crate) user: String,
 }
 
 #[derive(Deserialize, Default, Debug)]
