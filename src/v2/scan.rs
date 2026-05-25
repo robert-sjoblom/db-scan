@@ -231,8 +231,7 @@ async fn is_primary(client: &Client) -> anyhow::Result<bool> {
     Ok(is_primary)
 }
 
-#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(Clone))]
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize, Clone)]
 pub struct AnalyzedNode {
     pub id: u32,
     pub cluster_id: u32,
@@ -312,8 +311,7 @@ If replica:
 
 use crate::v2::scan::health_check_replica::ReplicaHealthCheckResult;
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(Clone))]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Unknown,

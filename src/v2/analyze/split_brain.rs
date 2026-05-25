@@ -6,7 +6,7 @@ use crate::v2::{
 };
 
 /// How split-brain was resolved.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum SplitBrainResolution {
     /// Higher timeline indicates the true primary (most recent promotion).
     HigherTimeline {
@@ -49,7 +49,7 @@ struct TimelineInfo<'a> {
 }
 
 /// Information about a split-brain scenario and its resolution.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SplitBrainInfo {
     /// The node determined to be the true primary based on timeline analysis.
     pub true_primary: String,
@@ -61,7 +61,7 @@ pub struct SplitBrainInfo {
     pub findings: Vec<SplitBrainFinding>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub enum Confidence {
     BestEffort,
     Conflicting,

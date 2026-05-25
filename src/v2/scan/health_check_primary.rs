@@ -83,8 +83,7 @@ impl From<String> for PgSyncSettings {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
-#[cfg_attr(test, derive(Clone))]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub struct ArchiverStats {
     pub archived_count: i64,
     pub failed_count: i64,
@@ -94,8 +93,7 @@ pub struct ArchiverStats {
     pub last_failed_time: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
-#[cfg_attr(test, derive(Clone))]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub struct ReplicationSlot {
     pub slot_name: String,
     pub plugin: Option<String>,
@@ -105,8 +103,7 @@ pub struct ReplicationSlot {
     pub wal_retained: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
-#[cfg_attr(test, derive(Clone))]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub struct PrimaryHealthCheckResult {
     pub current_time: DateTime<Utc>,
     pub system_identifier: String,
@@ -120,8 +117,7 @@ pub struct PrimaryHealthCheckResult {
     pub replication_slots: Vec<ReplicationSlot>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
-#[cfg_attr(test, derive(Clone))]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub struct ReplicationConnection {
     pub pid: i32,
     pub usesysid: i32,
