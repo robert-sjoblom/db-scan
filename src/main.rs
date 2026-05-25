@@ -12,6 +12,7 @@ use crate::{
     timings::{Event, Stage},
     v2::{
         analyze::analyze_clusters,
+        capture::capture,
         cluster::cluster_builder,
         db,
         node::Node,
@@ -224,6 +225,9 @@ async fn run_scan(
         })
         .stage(Stage::Analyze, |ctx, rx, tx| {
             analyze_clusters(Arc::clone(&ctx), rx, tx)
+        })
+        .stage(Stage::Capture, |ctx, rx, tx| {
+            capture(Arc::clone(&ctx), rx, tx)
         })
         .sink(Stage::Write, |ctx, rx| write_results(Arc::clone(&ctx), rx))
         .run()

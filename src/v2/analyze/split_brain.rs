@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
+use serde::Serialize;
+
 use crate::v2::{
     analyze::get_timeline,
     scan::{AnalyzedNode, Role},
 };
 
 /// How split-brain was resolved.
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Serialize)]
 pub enum SplitBrainResolution {
     /// Higher timeline indicates the true primary (most recent promotion).
     HigherTimeline {
@@ -49,7 +51,7 @@ struct TimelineInfo<'a> {
 }
 
 /// Information about a split-brain scenario and its resolution.
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Serialize)]
 pub struct SplitBrainInfo {
     /// The node determined to be the true primary based on timeline analysis.
     pub true_primary: String,
@@ -61,7 +63,7 @@ pub struct SplitBrainInfo {
     pub findings: Vec<SplitBrainFinding>,
 }
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, Serialize)]
 pub enum Confidence {
     BestEffort,
     Conflicting,
@@ -70,7 +72,7 @@ pub enum Confidence {
 
 /// Structured finding attached to a split-brain resolution.
 /// Categories defined in ADR-002 §4.
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Serialize)]
 pub enum SplitBrainFinding {
     SystemIdentifierMismatch {
         nodes: Vec<String>,

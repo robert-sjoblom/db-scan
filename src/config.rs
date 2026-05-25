@@ -56,7 +56,8 @@ impl DbScanConfig {
             .port(pg_cfg.postgres.port)
             .dbname(&pg_cfg.postgres.dbname)
             .user(&pg_cfg.postgres.user)
-            .ssl_mode(SslMode::Require)
+            .password(self.pgpassword.expose_secret())
+            .ssl_mode(SslMode::Prefer)
             .connect_timeout(Duration::from_secs(5));
 
         Some(cfg)
