@@ -149,6 +149,7 @@ pub struct ReplicationConnection {
 static HEALTH_CHECK_PRIMARY_QUERY: &str = "
 WITH cc AS (SELECT timeline_id FROM pg_control_checkpoint())
 SELECT jsonb_build_object(
+    'current_time', (SELECT now()),
     'timeline_id', (SELECT timeline_id FROM cc),
     'timeline_history', (
         SELECT CASE
