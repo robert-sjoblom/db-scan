@@ -56,7 +56,7 @@ pub struct LagInfo {
 }
 
 static HEALTH_CHECK_REPLICA_QUERY: &str = "SELECT jsonb_build_object(
-    'current_time': (SELECT now()),
+    'current_time', (SELECT now()),
     'timeline_id', (SELECT timeline_id FROM pg_control_checkpoint()),
     'system_identifier', (SELECT system_identifier::text FROM pg_control_system()),
     'wal_receiver', (
