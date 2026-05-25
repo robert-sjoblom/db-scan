@@ -12,17 +12,19 @@ pub enum Stage {
     Scan,
     Clustering,
     Analyze,
+    Capture,
     Write,
 }
 
 impl std::fmt::Display for Stage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            Stage::DatabasePortal => write!(f, "Node Discovery"),
-            Stage::Scan => write!(f, "Scan"),
-            Stage::Analyze => write!(f, "Analysis"),
-            Stage::Write => write!(f, "Output"),
-            Stage::Clustering => write!(f, "Clustering"),
+            Self::DatabasePortal => write!(f, "Node Discovery"),
+            Self::Scan => write!(f, "Scan"),
+            Self::Analyze => write!(f, "Analysis"),
+            Self::Write => write!(f, "Output"),
+            Self::Clustering => write!(f, "Clustering"),
+            Self::Capture => write!(f, "Capture"),
         }
     }
 }
