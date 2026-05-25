@@ -48,6 +48,12 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    if args.print_config {
+        println!("{args:#?}");
+        std::process::exit(0);
+    }
+
     run(args);
 }
 

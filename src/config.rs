@@ -17,6 +17,7 @@ pub(crate) fn get_config() -> &'static DbScanConfig {
 #[expect(clippy::struct_excessive_bools, reason = "independent CLI flags")]
 #[derive(Debug)]
 pub(crate) struct DbScanConfig {
+    pub(crate) print_config: bool,
     pub(crate) pguser: String,
     pub(crate) pgpassword: Secret<String>,
     pub(crate) pgsslkey: PathBuf,
@@ -51,6 +52,10 @@ pub(crate) struct CliArgs {
     /// Skip loading the config file.
     #[arg(long)]
     pub(crate) no_config: bool,
+
+    /// Print the resolved configuration (after merging CLI, env, and file) to stdout and exit.
+    #[arg(long)]
+    pub(crate) print_config: bool,
 
     /// Your PG User.
     #[arg(long, env = "PGUSER")]
@@ -220,6 +225,7 @@ fn load_file(explicit: Option<&PathBuf>, no_config: bool) -> anyhow::Result<File
 /// Parse CLI args, load the config file, and merge into the final `DbScanConfig`.
 pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
     let cli = CliArgs::parse();
+
     let file = load_file(cli.config.as_ref(), cli.no_config)?;
 
     let pguser = cli
@@ -261,7 +267,8 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         .url
         .ok_or_else(|| anyhow!("database_portal.url not set in config"))?;
 
-    Ok(DbScanConfig {
+    let config = DbScanConfig {
+        print_config: cli.print_config,
         pguser,
         pgpassword: cli.pgpassword,
         pgsslkey,
@@ -281,5 +288,7 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         check_disks: cli.check_disks,
         max_concurrency,
         database_portal_url,
-    })
+    };
+
+    Ok(config)
 }
