@@ -186,7 +186,7 @@ async fn run_scan(
     writer_options: Arc<WriterOptions>,
     cluster_filter: Option<&HashSet<String>>,
 ) -> anyhow::Result<ScanResult> {
-    let pipeline_ctx = PipelineContext::new(timings_tx.clone(), writer_options);
+    let pipeline_ctx = PipelineContext::new(timings_tx.clone(), writer_options, None);
 
     // Clone filter for the spawned task (needs 'static)
     let filter = cluster_filter.cloned();
