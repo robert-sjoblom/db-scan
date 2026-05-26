@@ -16,7 +16,20 @@ use crate::{CONFIG, config::DbScanConfig, errors, v2::node::Node};
 
 static CONNECTOR: OnceLock<MakeRustlsConnect> = OnceLock::new();
 static INSECURE_CONNECTOR: OnceLock<MakeRustlsConnect> = OnceLock::new();
-type PgConnection = Connection<Socket, <MakeRustlsConnect as MakeTlsConnect<Socket>>::Stream>;
+pub type PgConnection = Connection<Socket, <MakeRustlsConnect as MakeTlsConnect<Socket>>::Stream>;
+
+/// Connect using a caller-supplied [`Config`] and the global cert-based TLS
+/// connector. Returns `(Client, PgConnection)`; the caller is responsible for
+/// spawning the connection driver.
+///
+/// Used by features that need to connect to a Postgres that isn't part of the
+/// scanned node fleet (e.g. capture uploads).
+pub async fn connect_with(cfg: &Config) -> anyhow::Result<(Client, PgConnection)> {
+    cfg.connect(connector().clone())
+        .await
+        .map_err(errors::pg_err)
+        .context("attempting: postgres connect")
+}
 
 pub async fn connect(node: &Node) -> anyhow::Result<(Client, PgConnection)> {
     tracing::trace!(node_name = %node.name, node_id = node.id, "connecting to node");

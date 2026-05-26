@@ -98,10 +98,9 @@ db-scan --check-disks --ssh-user first_last
 ```
 
 **How it works:**
-- SSHes into every node and runs `dmesg -T --since "<window> minutes ago"`
+- SSHes into every node and runs `dmesg -T`
 - Parses output for I/O errors, filesystem errors (EXT4/XFS), and block device errors
 - Errors are surfaced as **Degraded { DiskIoErrors }** or **Critical { FilesystemErrors }** cluster states
-- Window defaults to 60 minutes; override with `--disk-check-window-minutes` or `DISK_CHECK_WINDOW_MINUTES`
 
 ## Configuration
 
@@ -127,11 +126,18 @@ display:
   log_level: info
   no_color: false
 
-disk_check:
-  window_minutes: 60
-
 scan:
   max_concurrency: 256
+
+# Optional: upload each run's pipeline state to an internal postgres for
+# building an analyzer test corpus. Off by default. See "Remote Capture" below.
+capture:
+  enabled: false
+  postgres:
+    host: capture.example.com
+    port: 5432
+    dbname: db_scan_captures
+    user: capture_writer
 ```
 
 All fields are optional. CLI flags and environment variables take precedence over the config file. `PGPASSWORD` is never read from the config file.
@@ -170,7 +176,6 @@ Options:
   -s, --silence-tracing                    Suppress tracing output (useful with --watch)
   --check-disks                            Enable disk health checks via SSH on nodes
   --ssh-user <SSH_USER>                    SSH user for disk checks (e.g. "first_last") [env: SSH_USER]
-  --disk-check-window-minutes <MINUTES>    dmesg recency window for disk checks [default: 60] [env: DISK_CHECK_WINDOW_MINUTES]
   --max-concurrency <N>                    Max nodes scanned in parallel [default: 256] [env: DB_SCAN_MAX_CONCURRENCY]
   --default-user <USER>                    Default PostgreSQL user for non-cert auth [env: DEFAULT_USER]
   --default-pass <PASS>                    Default PostgreSQL password for non-cert auth [env: DEFAULT_PASS]
@@ -284,6 +289,55 @@ When multiple primaries are detected, the tool uses multiple strategies to deter
 2. **Replica Evidence**: Which primary are the replicas following?
 3. **Combined Evidence**: Both timeline and replica data agree
 4. **Override Case**: Replicas override timeline (isolated failed promotion)
+
+## Remote Capture
+
+Optionally, each db-scan run can persist its full pipeline state to an internal postgres so production cluster scenarios accumulate as an analyzer test corpus. Off by default; opt in via config.
+
+Design rationale and decisions: `docs/adr/003-remote-capture.md`.
+
+### Enabling
+
+Add a `capture:` block to the config:
+
+```yaml
+capture:
+  enabled: true
+  postgres:
+    host: capture.example.com
+    port: 5432
+    dbname: db_scan_captures
+    user: capture_writer
+```
+
+SSL certs are inherited from the top-level `postgres:` block; the password is taken from `PGPASSWORD`. When the block is absent or `enabled: false`, capture is off and the pipeline stage degrades to pure forwarding.
+
+### Destination schema (operator-owned)
+
+db-scan does **not** create or migrate this table. The DDL below is the contract:
+
+```sql
+CREATE TABLE db_scan.db_scan_captures (
+    id              BIGSERIAL    NOT NULL,
+    run_id          UUID         NOT NULL,
+    captured_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    binary_version  TEXT         NOT NULL,
+    binary_git_sha  TEXT,
+    hostname        TEXT         NOT NULL,
+    blob            JSONB        NOT NULL,
+    received_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CONSTRAINT db_scan_captures_pkey PRIMARY KEY (id)
+);
+```
+
+- One row per cluster scanned. All rows from a single run share a `run_id`.
+- `hostname` is the cluster name (not the machine running db-scan).
+- `blob` is the serialized `ClusterHealth` (the analyzer's per-cluster output).
+- Requires PG15+ (`gen_random_uuid()`).
+
+### Failure mode
+
+Capture is best-effort. Failure to connect at startup, insert errors, and timeouts (5 s) are logged and ignored — the diagnostic itself is never gated on capture health.
 
 ## Development
 

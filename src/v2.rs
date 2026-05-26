@@ -1,4 +1,5 @@
 pub mod analyze;
+pub mod capture;
 pub mod cluster;
 pub mod db;
 pub mod node;

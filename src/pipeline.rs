@@ -39,6 +39,7 @@ use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
+use tokio_postgres::Client;
 
 use crate::{
     timings::{Event, Stage},
@@ -58,6 +59,9 @@ pub struct PipelineContext {
     pub timings_tx: UnboundedSender<Event>,
     /// Configuration options for the output writer.
     pub writer_options: Arc<WriterOptions>,
+    /// Optional postgres client for capture uploads. `None` when capture is
+    /// disabled, unconfigured, or the connection failed at startup.
+    pub capture_client: Option<Arc<Client>>,
 }
 
 impl PipelineContext {
@@ -66,10 +70,18 @@ impl PipelineContext {
     /// # Arguments
     ///
     /// * `timings_tx` - Channel sender for emitting [`Event`]s to track stage timings.
-    pub fn new(timings_tx: UnboundedSender<Event>, writer_options: Arc<WriterOptions>) -> Self {
+    /// * `writer_options` - Options controlling output rendering.
+    /// * `capture_client` - Optional postgres client for capture uploads;
+    ///   `None` disables capture (no buffering, no upload).
+    pub fn new(
+        timings_tx: UnboundedSender<Event>,
+        writer_options: Arc<WriterOptions>,
+        capture_client: Option<Arc<Client>>,
+    ) -> Self {
         Self {
             timings_tx,
             writer_options,
+            capture_client,
         }
     }
 }
@@ -252,6 +264,7 @@ mod tests {
         let ctx = PipelineContext {
             timings_tx,
             writer_options: Arc::new(WriterOptions::default()),
+            capture_client: None,
         };
 
         let result = Pipeline::new(ctx)

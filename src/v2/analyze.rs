@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use serde::Serialize;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::instrument;
 
@@ -35,7 +36,7 @@ mod checks;
 mod classify;
 mod split_brain;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone, Serialize)]
 pub struct AnalyzedCluster {
     pub cluster: Cluster,
     pub verdict: Verdict,
@@ -48,7 +49,7 @@ impl AnalyzedCluster {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone, Serialize)]
 /// Represents the overall health of the `PostgreSQL` cluster.
 pub enum ClusterHealth {
     /// ✅ The cluster is fully operational and redundant.
@@ -99,9 +100,7 @@ pub enum ClusterHealth {
 }
 
 impl ClusterHealth {
-    /// Returns a reference to the analyzed cluster. Test-only accessor;
-    /// production code matches each variant directly to extract the cluster.
-    #[cfg(test)]
+    /// Returns a reference to the analyzed cluster.
     pub fn cluster(&self) -> &AnalyzedCluster {
         match self {
             ClusterHealth::Healthy { cluster, .. }
@@ -112,7 +111,7 @@ impl ClusterHealth {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone, Copy, Serialize)]
 #[cfg_attr(test, derive(strum::EnumIter))]
 pub enum Reason {
     // Declaration order = ascending severity; classify picks the worst via
@@ -169,7 +168,7 @@ enum Tier {
     Unknown,
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq, Clone, Serialize)]
 pub struct Verdict {
     node_verdicts: Vec<(NodeName, NodeVerdict)>,
     cluster_verdict: Option<ClusterVerdict>,
@@ -215,7 +214,7 @@ impl Verdict {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone, Serialize)]
 pub enum NodeVerdict {
     ArchiveFailure {
         failed_count: i64,
@@ -251,7 +250,7 @@ pub enum NodeVerdict {
     Unreachable,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone, Serialize)]
 pub enum ClusterVerdict {
     SplitBrain(SplitBrainInfo),
     WritesBlocked,

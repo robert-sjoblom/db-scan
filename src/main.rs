@@ -12,7 +12,9 @@ use crate::{
     timings::{Event, Stage},
     v2::{
         analyze::analyze_clusters,
+        capture::capture,
         cluster::cluster_builder,
+        db,
         node::Node,
         scan::scan_nodes,
         writer::{ScanResult, WriterOptions, write_results},
@@ -48,6 +50,12 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    if args.print_config {
+        println!("{args:#?}");
+        std::process::exit(0);
+    }
+
     run(args);
 }
 
@@ -56,8 +64,6 @@ async fn run(args: config::DbScanConfig) {
     if !args.silence_tracing {
         logging::setup(args.log_level.clone());
     }
-
-    tracing::trace!(args = ?args, "parsed command line arguments");
 
     if args.check_disks && args.ssh_user.is_none() {
         tracing::warn!(
@@ -180,7 +186,29 @@ async fn run_scan(
     writer_options: Arc<WriterOptions>,
     cluster_filter: Option<&HashSet<String>>,
 ) -> anyhow::Result<ScanResult> {
-    let pipeline_ctx = PipelineContext::new(timings_tx.clone(), writer_options);
+    let cfg = get_config();
+
+    // Set up capture DB connection before building the pipeline and moving args
+    let capture_client = if let Some(pg_cfg) = &cfg.capture_cfg() {
+        match db::connect_with(pg_cfg).await {
+            Ok((client, conn)) => {
+                tokio::spawn(async move {
+                    if let Err(e) = conn.await {
+                        tracing::error!(error = ?e, "capture connection closed");
+                    }
+                });
+                Some(Arc::new(client))
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "capture setup failed; capture disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let pipeline_ctx = PipelineContext::new(timings_tx.clone(), writer_options, capture_client);
 
     // Clone filter for the spawned task (needs 'static)
     let filter = cluster_filter.cloned();
@@ -197,6 +225,9 @@ async fn run_scan(
         })
         .stage(Stage::Analyze, |ctx, rx, tx| {
             analyze_clusters(Arc::clone(&ctx), rx, tx)
+        })
+        .stage(Stage::Capture, |ctx, rx, tx| {
+            capture(Arc::clone(&ctx), rx, tx)
         })
         .sink(Stage::Write, |ctx, rx| write_results(Arc::clone(&ctx), rx))
         .run()
