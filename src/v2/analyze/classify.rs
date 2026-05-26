@@ -113,7 +113,7 @@ mod tests {
     /// assigning it a rank here is a compile error. `Unknown`-tier reasons
     /// are never compared against `Critical`/`Degraded` ones by `classify`,
     /// so their ranks are arbitrary.
-    fn severity_rank(r: &Reason) -> u8 {
+    fn severity_rank(r: Reason) -> u8 {
         match r {
             // Unknown tier (rank arbitrary; not compared with other tiers).
             Reason::NoNodesReachable => 0,
@@ -208,8 +208,8 @@ mod tests {
 
         for a in Reason::iter() {
             for b in Reason::iter() {
-                let ra = severity_rank(&a);
-                let rb = severity_rank(&b);
+                let ra = severity_rank(a);
+                let rb = severity_rank(b);
                 assert_eq!(
                     a.cmp(&b),
                     ra.cmp(&rb),
