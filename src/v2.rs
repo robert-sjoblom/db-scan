@@ -109,7 +109,7 @@ pub(crate) mod tests_common {
             self
         }
 
-        pub fn _with_system_identifier(mut self, identifier: &str) -> Self {
+        pub fn with_system_identifier(mut self, identifier: &str) -> Self {
             self.system_identfier = identifier.to_owned();
             self
         }
@@ -219,7 +219,7 @@ pub(crate) mod tests_common {
             self
         }
 
-        pub fn _with_system_identifier(mut self, system_identifier: &str) -> Self {
+        pub fn with_system_identifier(mut self, system_identifier: &str) -> Self {
             self.system_identifier = system_identifier.to_owned();
             self
         }
