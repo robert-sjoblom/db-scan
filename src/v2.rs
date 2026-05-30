@@ -39,6 +39,8 @@ pub(crate) mod tests_common {
     pub struct PrimaryHealthBuilder {
         current_time: DateTime<Utc>,
         replication_count: usize,
+        followers: Vec<String>,
+        follower_state: ReplicationState,
         system_identfier: String,
         timeline_history: Option<String>,
         replay_lag: Option<String>,
@@ -59,6 +61,8 @@ pub(crate) mod tests_common {
             Self {
                 current_time: DateTime::<Utc>::UNIX_EPOCH,
                 replication_count: 0,
+                followers: Vec::new(),
+                follower_state: ReplicationState::Streaming,
                 system_identfier: "6968745321024393216".to_owned(),
                 timeline_history: None,
                 replay_lag: None,
@@ -84,6 +88,21 @@ pub(crate) mod tests_common {
 
         pub fn with_replication(mut self, count: usize) -> Self {
             self.replication_count = count;
+            self
+        }
+
+        /// Add `pg_stat_replication` rows with explicit `application_name`s
+        /// matching given replica node names. Used by tests that need the
+        /// flushing-liveness gate's primary side to corroborate.
+        pub fn with_followers(mut self, followers: &[&str]) -> Self {
+            self.followers = followers.iter().map(|s| (*s).to_owned()).collect();
+            self
+        }
+
+        /// Override the `state` field on every generated `pg_stat_replication`
+        /// row. Default is `Streaming`.
+        pub fn with_follower_state(mut self, state: ReplicationState) -> Self {
+            self.follower_state = state;
             self
         }
 
@@ -132,18 +151,28 @@ pub(crate) mod tests_common {
                 base_lsn
             };
 
-            let replication: Vec<ReplicationConnection> = (0..self.replication_count)
-                .map(|i| ReplicationConnection {
+            let app_names: Vec<String> = if self.followers.is_empty() {
+                (0..self.replication_count)
+                    .map(|i| format!("dev_pg_app001_db00{}", i + 2))
+                    .collect()
+            } else {
+                self.followers
+            };
+
+            let replication: Vec<ReplicationConnection> = app_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| ReplicationConnection {
                     pid: 1000 + i as i32,
                     usesysid: 0x4003,
                     usename: "replicator".to_owned(),
-                    application_name: format!("dev_pg_app001_db00{}", i + 2),
+                    application_name: name.clone(),
                     client_addr: Some(format!("10.8{}.12.151", i + 2)),
                     client_hostname: None,
                     client_port: Some(63512 + i as i32),
                     backend_start: Utc::now(),
                     backend_xmin: Some("621647066".to_owned()),
-                    state: ReplicationState::Streaming,
+                    state: self.follower_state.clone(),
                     sent_lsn: Some(base_lsn.to_owned()),
                     write_lsn: Some(lagging_lsn.to_owned()),
                     flush_lsn: Some(lagging_lsn.to_owned()),
@@ -196,6 +225,9 @@ pub(crate) mod tests_common {
         system_identifier: String,
         lag: LagInfo,
         sender_host: String,
+        sender_port: i32,
+        wal_receiver_status: String,
+        last_msg_receipt_time: Option<DateTime<Utc>>,
         has_wal_receiver: bool,
     }
 
@@ -210,6 +242,9 @@ pub(crate) mod tests_common {
                     last_transaction_replay_at: Some(Utc::now()),
                 },
                 sender_host: "127.1.12.151".to_owned(),
+                sender_port: 5432,
+                wal_receiver_status: "streaming".to_owned(),
+                last_msg_receipt_time: Some(Utc::now()),
                 has_wal_receiver: true,
             }
         }
@@ -229,6 +264,21 @@ pub(crate) mod tests_common {
             self
         }
 
+        pub fn with_sender_port(mut self, port: i32) -> Self {
+            self.sender_port = port;
+            self
+        }
+
+        pub fn with_wal_receiver_status(mut self, status: &str) -> Self {
+            self.wal_receiver_status = status.to_owned();
+            self
+        }
+
+        pub fn with_last_msg_receipt_time(mut self, t: Option<DateTime<Utc>>) -> Self {
+            self.last_msg_receipt_time = t;
+            self
+        }
+
         pub fn without_wal_receiver(mut self) -> Self {
             self.has_wal_receiver = false;
             self
@@ -243,19 +293,19 @@ pub(crate) mod tests_common {
             let wal_receiver = if self.has_wal_receiver {
                 Some(WalReceiverInfo {
                     pid: 4_053_449,
-                    status: "streaming".to_owned(),
+                    status: self.wal_receiver_status,
                     receive_start_lsn: "47F/67000000".to_owned(),
                     receive_start_tli: self.timeline_id,
                     written_lsn: "48F/6957B540".to_owned(),
                     flushed_lsn: "48F/6957B540".to_owned(),
                     received_tli: self.timeline_id,
                     last_msg_send_time: Some(Utc::now()),
-                    last_msg_receipt_time: Some(Utc::now()),
+                    last_msg_receipt_time: self.last_msg_receipt_time,
                     latest_end_lsn: "48F/6957B540".to_owned(),
                     latest_end_time: Some(Utc::now()),
                     slot_name: None,
                     sender_host: self.sender_host,
-                    sender_port: 5432,
+                    sender_port: self.sender_port,
                     conninfo: "user=replicator host=127.1.12.151".to_owned(),
                 })
             } else {
