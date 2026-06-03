@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::v2::{
     analyze::{NodeName, get_timeline},
-    scan::{AnalyzedNode, Role},
+    scan::{AnalyzedNode, Role, health_check_primary::ReplicationState},
 };
 
 /// How split-brain was resolved.
@@ -108,8 +108,17 @@ pub enum SplitBrainFinding {
 
 #[derive(Debug, Serialize, Clone, Eq, PartialEq)]
 pub struct ReplicationLink {
-    primary: NodeName,
-    replica: NodeName,
+    pub primary: NodeName,
+    pub replica: NodeName,
+}
+
+impl ReplicationLink {
+    pub fn new<T: Into<NodeName>>(primary: T, replica: T) -> Self {
+        Self {
+            primary: primary.into(),
+            replica: replica.into(),
+        }
+    }
 }
 
 /// Resolve a split-brain scenario by determining the true primary.
@@ -138,7 +147,7 @@ pub(super) fn resolve_split_brain(
         .copied()
         .collect::<Vec<_>>();
 
-    let findings = if mismatched_nodes.is_empty() {
+    let mut findings = if mismatched_nodes.is_empty() {
         Vec::new()
     } else {
         vec![SplitBrainFinding::SystemIdentifierMismatch {
@@ -146,8 +155,9 @@ pub(super) fn resolve_split_brain(
         }]
     };
 
-    let replicas_following =
+    let (replicas_following, following_findings) =
         build_replica_following_map(&timeline_info, filtered_replicas.as_slice());
+    findings.extend(following_findings);
     determine_true_primary(&timeline_info, &replicas_following, &findings)
 }
 
@@ -190,49 +200,125 @@ fn extract_timeline_info<'a>(primaries: &[&'a AnalyzedNode]) -> TimelineInfo<'a>
     }
 }
 
-/// Build a map of which replicas are following which primary.
+/// Build a map of which replicas are bidirectionally streaming for each primary.
 ///
-/// For each primary, checks if any replica's WAL receiver is connected to that
-/// primary's IP address (on port 5432). Returns a map from primary node name
-/// to the list of replica node names following it.
+/// A replica counts as following a primary only when both sides of the streaming
+/// connection look fresh.
+///
+///   - Replica side (authoritative): `wal_receiver` names this primary, status is
+///     `streaming`/`catchup` and `last_msg_receipt_time` is within the freshness
+///     threshold.
+///   - Primary side (corroborating): `pg_stat_replication` has a row with a non-empty
+///     `application_name` matching the replica, stat is `streaming`/`catchup`, and
+///     `reply_time` is fresh
+///
+/// Outcomes:
+///   - replica-side fails -> not following (silent).
+///   - replica-side passes but primary-side fails -> not following + `PrimaryDoesNotSeeReplica`
+///   - Both pass -> following + `BidirectionalFlushingConfirmed` (plus `ReplicaInCatchup`
+///     if the primary-side state is `catchup`
+///
+/// Freshness uses each node's own `current_time` against that same node's recorded
+/// timestamps, so the comparison is intra-node and immune to scanner<->db clock skew
+/// that would otherwise eat into a tight threshold.
 fn build_replica_following_map(
     timeline_info: &TimelineInfo<'_>,
     replicas: &[&AnalyzedNode],
-) -> HashMap<NodeName, Vec<NodeName>> {
-    // First, build a map of sender (host:port) -> replica names
-    let mut replicas_by_sender: HashMap<String, Vec<NodeName>> = HashMap::new();
+) -> (HashMap<NodeName, Vec<NodeName>>, Vec<SplitBrainFinding>) {
+    let mut findings = Vec::new();
+    let mut following: HashMap<String, Vec<String>> = HashMap::new();
 
-    for replica in replicas {
-        if let Role::Replica { health } = &replica.role
-            && let Some(wal_receiver) = &health.wal_receiver
-        {
-            let sender_key = format!("{}:{}", wal_receiver.sender_host, wal_receiver.sender_port);
-            replicas_by_sender
-                .entry(sender_key)
-                .or_default()
-                .push(replica.node_name.clone());
-        }
-    }
-
-    // Match sender IPs to primaries (combine both highest and lower timeline primaries)
-    let all_primaries: Vec<_> = timeline_info
+    // Iterate both highest- and lower-timeline primaries. A lower-TL primary with
+    // a flushing replica is the `LowerTimelineHasQuorum` signal this module exist
+    // to detect.
+    let all_primaries = timeline_info
         .primaries_with_highest_timeline
         .iter()
         .chain(timeline_info.primaries_with_lower_timeline.iter())
-        .collect();
+        .map(|(p, _)| *p);
 
-    let mut replicas_following = HashMap::new();
+    for primary in all_primaries {
+        let Some(p_health) = primary.role.as_primary() else {
+            continue;
+        };
+        // `wal_sender_timeout` can differ between primaries
+        let threshold_ms = (parse_wal_sender_timeout(&p_health.configuration) / 2) + 30_000;
 
-    for (primary, _) in all_primaries {
-        let primary_ip = primary.ip_address.to_string();
-        // Check for connections on standard PostgreSQL port
-        let key_5432 = format!("{}:5432", primary_ip);
-        if let Some(followers) = replicas_by_sender.get(&key_5432) {
-            replicas_following.insert(primary.node_name.clone(), followers.clone());
+        for replica in replicas {
+            let Role::Replica { health: r_health } = &replica.role else {
+                continue;
+            };
+            let Some(wr) = &r_health.wal_receiver else {
+                continue;
+            };
+
+            // Replica-side gate (authoritative). The `last_msg_receipt_time`
+            // freshness check is what separates a live stream from a stale row:
+            // a dead `wal_receiver` keeps its values until `wal_sender_timeout`
+            // fires, so without this check `status="streaming"` alone would pass
+            // on a connection that just died.
+            let replica_passes = wr.sender_host == primary.ip_address.to_string()
+                && wr.sender_port == 5432
+                && matches!(wr.status.as_str(), "streaming" | "catchup")
+                && wr.last_msg_receipt_time.is_some_and(|t| {
+                    (r_health.current_time - t).num_milliseconds() <= threshold_ms
+                });
+
+            if !replica_passes {
+                // Only flag stale when the replica's `sender_host` named this
+                // primary. Otherwise the replica isn't pointing here, and every
+                // primary in the outer loop would emit a finding for every replica
+                // that follows some *other* primary.
+                if wr.sender_host == primary.ip_address.to_string() {
+                    findings.push(SplitBrainFinding::ReplicaWalReceiverStale {
+                        replica: replica.node_name.clone(),
+                        claimed_sender: primary.node_name.clone(),
+                    });
+                }
+                continue;
+            }
+
+            // primary-side gate (corroborating). Rejects:
+            // - empty `application_name`; it's a pg default and matches indiscriminately
+            // - `state=backup`: pg_basebackup clients, not replication consumers.
+            let primary_row = p_health.replication.iter().find(|conn| {
+                !conn.application_name.is_empty()
+                    && conn.application_name == replica.node_name
+                    && matches!(
+                        conn.state,
+                        ReplicationState::Streaming | ReplicationState::Catchup
+                    )
+                    && conn.reply_time.is_some_and(|t| {
+                        (p_health.current_time - t).num_milliseconds() <= threshold_ms
+                    })
+            });
+
+            match primary_row {
+                Some(row) => {
+                    following
+                        .entry(primary.node_name.clone())
+                        .or_default()
+                        .push(replica.node_name.clone());
+
+                    findings.push(SplitBrainFinding::BidirectionalFlushingConfirmed(
+                        ReplicationLink::new(&primary.node_name, &replica.node_name),
+                    ));
+
+                    if matches!(row.state, ReplicationState::Catchup) {
+                        findings.push(SplitBrainFinding::ReplicaInCatchup(ReplicationLink::new(
+                            &primary.node_name,
+                            &replica.node_name,
+                        )));
+                    }
+                }
+                None => findings.push(SplitBrainFinding::PrimaryDoesNotSeeReplica(
+                    ReplicationLink::new(&primary.node_name, &replica.node_name),
+                )),
+            }
         }
     }
 
-    replicas_following
+    (following, findings)
 }
 
 /// Determine the true primary based on timeline and replica evidence.
@@ -488,6 +574,13 @@ fn mismatched_sysid_nodes(
         .collect()
 }
 
+/// Parses `wal_sender_timeout` from `pg_settings.setting`.
+fn parse_wal_sender_timeout(cfg: &HashMap<String, String>) -> i64 {
+    cfg.get("wal_sender_timeout")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60_000) // pg default
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
@@ -495,6 +588,7 @@ mod tests {
     use super::*;
     use crate::v2::tests_common::{NodeBuilder, PrimaryHealthBuilder, ReplicaHealthBuilder};
 
+    use chrono::{DateTime, Utc};
     use pretty_assertions::assert_eq;
     use rstest::rstest;
 
@@ -503,6 +597,25 @@ mod tests {
             .with_id(id)
             .with_ip(ip)
             .with_primary(PrimaryHealthBuilder::new().with_timeline(timeline).build())
+            .build()
+    }
+
+    fn primary_with_followers(
+        id: u32,
+        name: &str,
+        ip: Ipv4Addr,
+        timeline: i32,
+        followers: &[&str],
+    ) -> AnalyzedNode {
+        NodeBuilder::new(name)
+            .with_id(id)
+            .with_ip(ip)
+            .with_primary(
+                PrimaryHealthBuilder::new()
+                    .with_timeline(timeline)
+                    .with_followers(followers)
+                    .build(),
+            )
             .build()
     }
 
@@ -530,13 +643,6 @@ mod tests {
             Confidence::Refuse => 0,
             Confidence::Conflicting => 5,
             Confidence::BestEffort => 10,
-        }
-    }
-
-    fn replication_link(primary: &str, replica: &str) -> ReplicationLink {
-        ReplicationLink {
-            primary: primary.to_owned(),
-            replica: replica.to_owned(),
         }
     }
 
@@ -568,15 +674,15 @@ mod tests {
         Confidence::Conflicting
     )]
     #[case::primary_does_not_see_replica(
-        SplitBrainFinding::PrimaryDoesNotSeeReplica(replication_link("db001", "db003")),
+        SplitBrainFinding::PrimaryDoesNotSeeReplica(ReplicationLink::new("db001", "db003")),
         Confidence::Conflicting
     )]
     #[case::replica_in_catchup(
-        SplitBrainFinding::ReplicaInCatchup(replication_link("db001", "db003")),
+        SplitBrainFinding::ReplicaInCatchup(ReplicationLink::new("db001", "db003")),
         Confidence::Conflicting
     )]
     #[case::bidirectional_flushing_confirmed(
-        SplitBrainFinding::BidirectionalFlushingConfirmed(replication_link("db001", "db003")),
+        SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new("db001", "db003")),
         Confidence::BestEffort
     )]
     #[case::sync_standby_names_diverged(
@@ -782,7 +888,7 @@ mod tests {
     #[test]
     fn timeline_and_replica_evidence_agree() {
         let db1 = primary(1, "db001", IP_DB1, 11);
-        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db2 = primary_with_followers(2, "db002", IP_DB2, 12, &["db003"]);
         let db3 = replica_following(3, "db003", IP_DB2, 12);
         let primaries = vec![&db1, &db2];
         let replicas = vec![&db3];
@@ -800,7 +906,9 @@ mod tests {
                     replicas_following_true: vec!["db003".to_owned()],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![],
+                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
+                    ReplicationLink::new("db002", "db003"),
+                )],
             }
         );
     }
@@ -809,7 +917,7 @@ mod tests {
     fn replica_following_lower_timeline_overrides() {
         // db002 has higher timeline (isolated after promotion);
         // replica still streams from db001 — db001 is the true primary.
-        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db1 = primary_with_followers(1, "db001", IP_DB1, 11, &["db003"]);
         let db2 = primary(2, "db002", IP_DB2, 12);
         let db3 = replica_following(3, "db003", IP_DB1, 11);
         let primaries = vec![&db1, &db2];
@@ -828,7 +936,9 @@ mod tests {
                     replicas_following_true: vec!["db003".to_owned()],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![],
+                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
+                    ReplicationLink::new("db001", "db003"),
+                )],
             }
         );
     }
@@ -836,7 +946,7 @@ mod tests {
     #[test]
     fn equal_timelines_resolved_by_replica_following() {
         let db1 = primary(1, "db001", IP_DB1, 13);
-        let db2 = primary(2, "db002", IP_DB2, 13);
+        let db2 = primary_with_followers(2, "db002", IP_DB2, 13, &["db003"]);
         let db3 = replica_following(3, "db003", IP_DB2, 13);
         let primaries = vec![&db1, &db2];
         let replicas = vec![&db3];
@@ -852,7 +962,9 @@ mod tests {
                     replicas_following_true: vec!["db003".to_owned()],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![],
+                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
+                    ReplicationLink::new("db002", "db003"),
+                )],
             }
         );
     }
@@ -862,7 +974,7 @@ mod tests {
         // Three-way split with equal timelines; kills the `len > 1 -> ==` mutant
         // (which would only match exactly-2 cases).
         let db1 = primary(1, "db001", IP_DB1, 13);
-        let db2 = primary(2, "db002", IP_DB2, 13);
+        let db2 = primary_with_followers(2, "db002", IP_DB2, 13, &["db004"]);
         let db3 = primary(3, "db003", IP_DB3, 13);
         let db4 = replica_following(4, "db004", IP_DB2, 13);
         let primaries = vec![&db1, &db2, &db3];
@@ -905,8 +1017,8 @@ mod tests {
 
     #[test]
     fn build_replica_following_map_groups_by_sender_ip() {
-        let db1 = primary(1, "db001", IP_DB1, 12);
-        let db2 = primary(2, "db002", IP_DB2, 11);
+        let db1 = primary_with_followers(1, "db001", IP_DB1, 12, &["r1", "r2"]);
+        let db2 = primary_with_followers(2, "db002", IP_DB2, 11, &["r3"]);
         let r1 = replica_following(3, "r1", IP_DB1, 12);
         let r2 = replica_following(4, "r2", IP_DB1, 12);
         let r3 = replica_following(5, "r3", IP_DB2, 11);
@@ -914,12 +1026,266 @@ mod tests {
         let replicas = vec![&r1, &r2, &r3];
 
         let info = extract_timeline_info(&primaries);
-        let map = build_replica_following_map(&info, &replicas);
+        let (map, _findings) = build_replica_following_map(&info, &replicas);
 
         assert_eq!(map.get("db001").unwrap().len(), 2);
         assert!(map.get("db001").unwrap().contains(&"r1".to_owned()));
         assert!(map.get("db001").unwrap().contains(&"r2".to_owned()));
         assert_eq!(map.get("db002").unwrap(), &vec!["r3".to_owned()]);
+    }
+
+    #[test]
+    fn gate_rejects_stale_last_msg_receipt() {
+        // Replica's wal_receiver row is stale (last_msg_receipt_time aged out
+        // past freshness threshold). Gate must reject it as a follower of db001.
+        let db1 = primary_with_followers(1, "db001", IP_DB1, 11, &["db003"]);
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let stale = DateTime::<Utc>::UNIX_EPOCH - chrono::Duration::seconds(600);
+        let db3 = NodeBuilder::new("db003")
+            .with_id(3)
+            .with_replica(
+                ReplicaHealthBuilder::new()
+                    .with_timeline(11)
+                    .with_sender_host(&IP_DB1.to_string())
+                    .with_last_msg_receipt_time(Some(stale))
+                    .build(),
+            )
+            .build();
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert_eq!(info.true_primary, "db002");
+        assert!(matches!(
+            info.resolution,
+            SplitBrainResolution::HigherTimeline { .. }
+        ));
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::ReplicaWalReceiverStale { replica, claimed_sender }
+                if replica == "db003" && claimed_sender == "db001"
+        )));
+    }
+
+    #[test]
+    fn gate_rejects_status_not_streaming() {
+        // wal_receiver.status="stopped" — not actively streaming.
+        let db1 = primary_with_followers(1, "db001", IP_DB1, 11, &["db003"]);
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = NodeBuilder::new("db003")
+            .with_id(3)
+            .with_replica(
+                ReplicaHealthBuilder::new()
+                    .with_timeline(11)
+                    .with_sender_host(&IP_DB1.to_string())
+                    .with_wal_receiver_status("stopped")
+                    .build(),
+            )
+            .build();
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert_eq!(info.true_primary, "db002");
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::ReplicaWalReceiverStale { replica, claimed_sender }
+                if replica == "db003" && claimed_sender == "db001"
+        )));
+    }
+
+    #[test]
+    fn gate_rejects_wrong_sender_port() {
+        // wal_receiver.sender_port != 5432 — defends against weird configs.
+        let db1 = primary_with_followers(1, "db001", IP_DB1, 11, &["db003"]);
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = NodeBuilder::new("db003")
+            .with_id(3)
+            .with_replica(
+                ReplicaHealthBuilder::new()
+                    .with_timeline(11)
+                    .with_sender_host(&IP_DB1.to_string())
+                    .with_sender_port(5433)
+                    .build(),
+            )
+            .build();
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert_eq!(info.true_primary, "db002");
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::ReplicaWalReceiverStale { replica, claimed_sender }
+                if replica == "db003" && claimed_sender == "db001"
+        )));
+    }
+
+    #[test]
+    fn gate_silent_when_wal_receiver_missing() {
+        // Replica has no wal_receiver at all — gate skips silently. No
+        // ReplicaWalReceiverStale should be emitted (no sender_host to compare).
+        let db1 = primary_with_followers(1, "db001", IP_DB1, 11, &["db003"]);
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = NodeBuilder::new("db003")
+            .with_id(3)
+            .with_replica(
+                ReplicaHealthBuilder::new()
+                    .with_timeline(11)
+                    .without_wal_receiver()
+                    .build(),
+            )
+            .build();
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert_eq!(info.true_primary, "db002");
+        assert!(
+            !info
+                .findings
+                .iter()
+                .any(|f| matches!(f, SplitBrainFinding::ReplicaWalReceiverStale { .. }))
+        );
+    }
+
+    #[test]
+    fn gate_rejects_none_last_msg_receipt_time() {
+        // last_msg_receipt_time is None — can't prove freshness, must reject.
+        let db1 = primary_with_followers(1, "db001", IP_DB1, 11, &["db003"]);
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = NodeBuilder::new("db003")
+            .with_id(3)
+            .with_replica(
+                ReplicaHealthBuilder::new()
+                    .with_timeline(11)
+                    .with_sender_host(&IP_DB1.to_string())
+                    .with_last_msg_receipt_time(None)
+                    .build(),
+            )
+            .build();
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert_eq!(info.true_primary, "db002");
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::ReplicaWalReceiverStale { replica, claimed_sender }
+                if replica == "db003" && claimed_sender == "db001"
+        )));
+    }
+
+    #[test]
+    fn gate_accepts_catchup_status_and_emits_replica_in_catchup() {
+        // status="catchup" on both sides — legitimately following mid-recovery.
+        // Gate passes; ReplicaInCatchup surfaces alongside BidirectionalFlushingConfirmed.
+        let db1 = NodeBuilder::new("db001")
+            .with_id(1)
+            .with_ip(IP_DB1)
+            .with_primary(
+                PrimaryHealthBuilder::new()
+                    .with_timeline(11)
+                    .with_followers(&["db003"])
+                    .with_follower_state(ReplicationState::Catchup)
+                    .build(),
+            )
+            .build();
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = NodeBuilder::new("db003")
+            .with_id(3)
+            .with_replica(
+                ReplicaHealthBuilder::new()
+                    .with_timeline(11)
+                    .with_sender_host(&IP_DB1.to_string())
+                    .with_wal_receiver_status("catchup")
+                    .build(),
+            )
+            .build();
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert_eq!(info.true_primary, "db001");
+        assert!(matches!(
+            info.resolution,
+            SplitBrainResolution::LowerTimelineHasQuorum { .. }
+        ));
+        assert!(
+            info.findings
+                .iter()
+                .any(|f| matches!(f, SplitBrainFinding::BidirectionalFlushingConfirmed(_)))
+        );
+        assert!(
+            info.findings
+                .iter()
+                .any(|f| matches!(f, SplitBrainFinding::ReplicaInCatchup(_)))
+        );
+    }
+
+    #[test]
+    fn gate_rejects_empty_application_name() {
+        // Primary's pg_stat_replication has a row with empty application_name.
+        // Replica-side gate passes, but no row matches "db003" → PrimaryDoesNotSeeReplica.
+        let db1 = primary_with_followers(1, "db001", IP_DB1, 11, &[""]);
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = replica_following(3, "db003", IP_DB1, 11);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert_eq!(info.true_primary, "db002");
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::PrimaryDoesNotSeeReplica(link)
+                if link.primary == "db001" && link.replica == "db003"
+        )));
+    }
+
+    #[test]
+    fn gate_rejects_state_backup() {
+        // pg_stat_replication row has state=Backup (pg_basebackup client),
+        // not a flushing replica. Primary-side gate rejects.
+        let db1 = NodeBuilder::new("db001")
+            .with_id(1)
+            .with_ip(IP_DB1)
+            .with_primary(
+                PrimaryHealthBuilder::new()
+                    .with_timeline(11)
+                    .with_followers(&["db003"])
+                    .with_follower_state(ReplicationState::Backup)
+                    .build(),
+            )
+            .build();
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = replica_following(3, "db003", IP_DB1, 11);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert_eq!(info.true_primary, "db002");
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::PrimaryDoesNotSeeReplica(link)
+                if link.primary == "db001" && link.replica == "db003"
+        )));
+    }
+
+    #[test]
+    fn gate_silent_when_sender_host_differs_no_stale_finding() {
+        // Replica follows db002 (sender_host=IP_DB2). When the gate iterates
+        // db001 as the candidate primary, the replica's sender_host doesn't
+        // match — no ReplicaWalReceiverStale should be emitted for db001.
+        // That finding is reserved for replicas that *claim* to follow this
+        // primary but fail a downstream check.
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary_with_followers(2, "db002", IP_DB2, 12, &["db003"]);
+        let db3 = replica_following(3, "db003", IP_DB2, 12);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert!(!info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::ReplicaWalReceiverStale { claimed_sender, .. }
+                if claimed_sender == "db001"
+        )));
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::BidirectionalFlushingConfirmed(link)
+                if link.primary == "db002" && link.replica == "db003"
+        )));
     }
 
     #[test]

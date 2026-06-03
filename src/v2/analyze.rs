@@ -1258,7 +1258,9 @@ mod cluster_state_tests {
         // not the resolution logic (covered by split_brain unit tests).
         use std::net::Ipv4Addr;
 
-        use crate::v2::analyze::split_brain::{SplitBrainInfo, SplitBrainResolution};
+        use crate::v2::analyze::split_brain::{
+            ReplicationLink, SplitBrainFinding, SplitBrainInfo, SplitBrainResolution,
+        };
 
         let ip_db1 = Ipv4Addr::new(127, 1, 12, 151);
         let ip_db2 = Ipv4Addr::new(127, 2, 12, 151);
@@ -1271,7 +1273,12 @@ mod cluster_state_tests {
         let db2 = NodeBuilder::new("dev-pg-app001-db002.sto2.example.com")
             .with_id(2)
             .with_ip(ip_db2)
-            .with_primary(PrimaryHealthBuilder::new().with_timeline(13).build())
+            .with_primary(
+                PrimaryHealthBuilder::new()
+                    .with_timeline(13)
+                    .with_followers(&["dev-pg-app001-db003.sto3.example.com"])
+                    .build(),
+            )
             .build();
         let db3 = NodeBuilder::new("dev-pg-app001-db003.sto3.example.com")
             .with_id(3)
@@ -1309,7 +1316,12 @@ mod cluster_state_tests {
                     ],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![],
+                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
+                    ReplicationLink::new(
+                        "dev-pg-app001-db002.sto2.example.com",
+                        "dev-pg-app001-db003.sto3.example.com",
+                    ),
+                )],
             })),
         );
     }

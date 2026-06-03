@@ -5,7 +5,6 @@
 //! Lines starting with `#` are comments.
 
 #[derive(Debug, PartialEq, Eq)]
-#[expect(clippy::used_underscore_items, reason = "will be used shortly")]
 pub struct TimelineHistoryEntry {
     pub previous_tli: i32,
     pub switch_lsn: String,
@@ -15,7 +14,7 @@ pub struct TimelineHistoryEntry {
 impl super::PrimaryHealthCheckResult {
     /// Parse the collected timeline-history file. Returns an empty vec when
     /// `timeline_history` is None (TL=1, no history file yet).
-    pub fn _timeline_history_entries(&self) -> Vec<TimelineHistoryEntry> {
+    pub fn timeline_history_entries(&self) -> Vec<TimelineHistoryEntry> {
         let Some(history) = &self.timeline_history else {
             return Vec::new();
         };
@@ -40,8 +39,7 @@ impl super::PrimaryHealthCheckResult {
 
     /// LSN at which `from_tli` ended and a new timeline forked off, if recorded.
     pub fn _fork_lsn_for(&self, from_tli: i32) -> Option<String> {
-        #[expect(clippy::used_underscore_items, reason = "will be used shortly")]
-        self._timeline_history_entries()
+        self.timeline_history_entries()
             .into_iter()
             .find(|e| e.previous_tli == from_tli)
             .map(|e| e.switch_lsn)
@@ -68,7 +66,7 @@ mod tests {
     fn parses_single_entry() {
         let h = with_history("1\t0/3000000\tno recovery target specified\n");
         assert_eq!(
-            h._timeline_history_entries(),
+            h.timeline_history_entries(),
             vec![TimelineHistoryEntry {
                 previous_tli: 1,
                 switch_lsn: "0/3000000".to_owned(),
@@ -80,13 +78,13 @@ mod tests {
     #[test]
     fn skips_blank_and_comment_lines() {
         let h = with_history("# header comment\n\n1\t0/3000000\treason1\n");
-        assert_eq!(h._timeline_history_entries().len(), 1);
+        assert_eq!(h.timeline_history_entries().len(), 1);
     }
 
     #[test]
     fn parses_multi_line_history() {
         let h = with_history("1\t0/3000000\treason1\n2\t0/5000000\treason2\n");
-        let entries = h._timeline_history_entries();
+        let entries = h.timeline_history_entries();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].previous_tli, 2);
         assert_eq!(entries[1].switch_lsn, "0/5000000");
@@ -103,6 +101,6 @@ mod tests {
     #[test]
     fn none_history_returns_no_entries() {
         let h: PrimaryHealthCheckResult = PrimaryHealthBuilder::new().build();
-        assert_eq!(h._timeline_history_entries(), vec![]);
+        assert_eq!(h.timeline_history_entries(), vec![]);
     }
 }
