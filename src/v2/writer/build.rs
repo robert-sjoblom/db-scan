@@ -48,7 +48,7 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
             let primary = build_primary_view(cluster, show_tl);
             let replicas =
                 build_replicas_view(cluster.cluster.primary(), &cluster.cluster.nodes, show_tl);
-            let reason_view = build_reason_view(reason, &cluster.verdict);
+            let reason_view = build_reason_view(*reason, &cluster.verdict);
             let disk = extract_disk_info(cluster);
             let failover = cluster.verdict.has_failover();
             log_degraded(cluster.name(), &reason_view.short, *lag);
@@ -64,10 +64,10 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
             }
         }
         ClusterHealth::Critical { cluster, reason } => {
-            let (primary, replicas) = build_primary_replicas_for_critical(cluster, reason);
-            let reason_view = build_reason_view(reason, &cluster.verdict);
+            let (primary, replicas) = build_primary_replicas_for_critical(cluster, *reason);
+            let reason_view = build_reason_view(*reason, &cluster.verdict);
             let disk = extract_disk_info(cluster);
-            log_critical(cluster, reason, &reason_view.short);
+            log_critical(cluster, *reason, &reason_view.short);
             ClusterView {
                 status: Status::Critical,
                 name: cluster.name().to_owned(),
@@ -84,7 +84,7 @@ pub(crate) fn build_cluster_view(health: &ClusterHealth) -> ClusterView {
             reachable_nodes,
             reason,
         } => {
-            let reason_view = build_reason_view(reason, &cluster.verdict);
+            let reason_view = build_reason_view(*reason, &cluster.verdict);
             let disk = extract_disk_info(cluster);
             tracing::warn!(
                 cluster = %cluster.name(),
@@ -168,7 +168,7 @@ fn build_replicas_view(
 
 fn build_primary_replicas_for_critical(
     cluster: &AnalyzedCluster,
-    reason: &Reason,
+    reason: Reason,
 ) -> (PrimaryView, ReplicasView) {
     match reason {
         Reason::NoPrimary => (PrimaryView::None, ReplicasView::None),
@@ -275,7 +275,7 @@ fn build_split_brain_replicas(info: &SplitBrainInfo) -> ReplicasView {
     }
 }
 
-fn build_reason_view(reason: &Reason, verdict: &Verdict) -> ReasonView {
+fn build_reason_view(reason: Reason, verdict: &Verdict) -> ReasonView {
     let (short, details_json) = format_reason(reason, verdict);
     ReasonView {
         short,
@@ -292,7 +292,7 @@ fn log_degraded(cluster: &str, reason: &str, lag: u64) {
     );
 }
 
-fn log_critical(cluster: &AnalyzedCluster, reason: &Reason, reason_str: &str) {
+fn log_critical(cluster: &AnalyzedCluster, reason: Reason, reason_str: &str) {
     let name = cluster.name();
     match reason {
         Reason::SplitBrain => {
@@ -483,7 +483,7 @@ fn extract_disk_info(cluster: &AnalyzedCluster) -> String {
     clippy::too_many_lines,
     reason = "one match arm per Reason variant; splitting would just trade size for indirection"
 )]
-fn format_reason(reason: &Reason, verdict: &Verdict) -> (String, String) {
+fn format_reason(reason: Reason, verdict: &Verdict) -> (String, String) {
     match reason {
         Reason::ReducedRedundancy => ("ReducedRedundancy".to_owned(), "{}".to_owned()),
         Reason::HighReplicationLag => ("HighReplicationLag".to_owned(), "{}".to_owned()),
