@@ -58,6 +58,7 @@ pub(crate) mod tests_common {
             // case override via with_config.
             let mut configuration = HashMap::new();
             configuration.insert("archive_mode".to_owned(), "on".to_owned());
+            configuration.insert("synchronous_commit".to_owned(), "on".to_owned());
             Self {
                 current_time: DateTime::<Utc>::UNIX_EPOCH,
                 replication_count: 0,
@@ -135,6 +136,12 @@ pub(crate) mod tests_common {
 
         pub fn with_timeline_history(mut self, timeline_history: &str) -> Self {
             self.timeline_history = Some(timeline_history.to_owned());
+            self
+        }
+
+        pub fn with_synchronous_commit(mut self, value: &str) -> Self {
+            self.configuration
+                .insert("synchronous_commit".to_owned(), value.to_owned());
             self
         }
 
