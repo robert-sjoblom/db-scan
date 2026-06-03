@@ -35,6 +35,7 @@ pub type SplitBrainResolution = crate::v2::analyze::split_brain::SplitBrainResol
 mod checks;
 mod classify;
 mod split_brain;
+mod sync_standby_names;
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize)]
 pub struct AnalyzedCluster {

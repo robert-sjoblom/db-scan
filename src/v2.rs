@@ -145,6 +145,12 @@ pub(crate) mod tests_common {
             self
         }
 
+        pub fn with_synchronous_standby_names(mut self, value: &str) -> Self {
+            self.configuration
+                .insert("synchronous_standby_names".to_owned(), value.to_owned());
+            self
+        }
+
         pub fn build(self) -> PrimaryHealthCheckResult {
             let base_lsn = "48F/6957B540";
             let has_high_lag = self
