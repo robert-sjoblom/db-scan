@@ -3,9 +3,14 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::v2::{
-    analyze::{NodeName, get_timeline},
+    analyze::{
+        NodeName, get_timeline,
+        sync_standby_names::{Quorum, parse},
+    },
     scan::{AnalyzedNode, Role, health_check_primary::ReplicationState},
 };
+
+const WEAKENED_SYNCHRONOUS_COMMIT: [&str; 4] = ["local", "off", "remote_write", ""];
 
 /// How split-brain was resolved.
 #[derive(Debug, Eq, PartialEq, Clone, Serialize)]
@@ -121,8 +126,6 @@ impl ReplicationLink {
     }
 }
 
-const WEAKENED_SYNCHRONOUS_COMMIT: [&str; 4] = ["local", "off", "remote_write", ""];
-
 /// Resolve a split-brain scenario by determining the true primary.
 ///
 /// Resolution strategy:
@@ -177,6 +180,8 @@ pub(super) fn resolve_split_brain(
     let (replicas_following, following_findings) =
         build_replica_following_map(&timeline_info, filtered_replicas.as_slice());
     findings.extend(following_findings);
+    findings.extend(emit_quorum_findings(primaries, &replicas_following));
+
     determine_true_primary(&timeline_info, &replicas_following, &findings)
 }
 
@@ -600,6 +605,68 @@ fn parse_wal_sender_timeout(cfg: &HashMap<String, String>) -> i64 {
         .unwrap_or(60_000) // pg default
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "we don't have MAXINT followers"
+)]
+/// A gated replica is a replica that passed through the bidirectional-streaming gate (`build_replica_following_map`).
+///
+/// Concretely, a replica is "gated" for a primary when *both sides* of the streaming connection looked fresh
+/// (see `split_brain.rs:222`).
+///
+/// Replicas that fail either side don't appear in the `replicas_following` map -- they exist physically, but are not
+/// counted as followers.
+///
+/// This matters for quorum because `synchronous_standby_names` lists _names_ of potential sync standbys. Postgres only
+/// acks a write when enough of them respond. A replica that is listed but isn't flushing cannot ack writes, so doesn't
+/// contribute to quorum _right now_.
+///
+/// So the count in this function is:
+/// observed = | members(SSN) ∩ gated(primary) | .
+///
+/// That is, how many SSN-listed standbys are _also_ currently live followers of this primary. If it's below `required`,
+/// the primary can't be acking sync writes.
+fn emit_quorum_findings(
+    primaries: &[&AnalyzedNode],
+    replicas_following: &HashMap<NodeName, Vec<NodeName>>,
+) -> Vec<SplitBrainFinding> {
+    let mut findings = Vec::new();
+
+    for p in primaries {
+        let Some(h) = p.role.as_primary() else {
+            continue;
+        };
+        let synchronous_standby_names = h
+            .configuration
+            .get("synchronous_standby_names")
+            .map_or("", String::as_str);
+        let Some(Quorum { count, members, .. }) = parse(synchronous_standby_names) else {
+            continue;
+        };
+
+        // A replica is "gated" for a primary when both sides of the
+        // streaming connection looked fresh
+        let gated = replicas_following
+            .get(&p.node_name)
+            .cloned()
+            .unwrap_or_default();
+        let observed = members
+            .iter()
+            .filter(|m| gated.iter().any(|g| g == *m))
+            .count() as u32;
+
+        if observed < count {
+            findings.push(SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                primary: p.node_name.clone(),
+                required: count,
+                observed,
+            });
+        }
+    }
+
+    findings
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
@@ -622,9 +689,15 @@ mod tests {
             .build()
     }
 
-    fn primary_with_health(id: u32, name: &str, health: PrimaryHealthCheckResult) -> AnalyzedNode {
+    fn primary_with_health(
+        id: u32,
+        name: &str,
+        ip: Ipv4Addr,
+        health: PrimaryHealthCheckResult,
+    ) -> AnalyzedNode {
         NodeBuilder::new(name)
             .with_id(id)
+            .with_ip(ip)
             .with_primary(health)
             .build()
     }
@@ -1337,6 +1410,7 @@ mod tests {
         let db1 = primary_with_health(
             1,
             "db001",
+            IP_DB1,
             PrimaryHealthBuilder::new()
                 .with_synchronous_commit("remote_write")
                 .build(),
@@ -1361,5 +1435,44 @@ mod tests {
 
         let info = resolve_split_brain(&[&db1, &db2], &[]);
         assert_ne!(info.confidence, Confidence::Refuse);
+    }
+
+    #[test]
+    fn primary_with_no_followers_emits_quorum_unsatisfied() {
+        let db1 = primary_with_health(
+            1,
+            "db001",
+            IP_DB1,
+            PrimaryHealthBuilder::new()
+                .with_synchronous_standby_names("ANY 1 (db002, db003")
+                .build(),
+        );
+
+        let db2 = primary_with_health(
+            2,
+            "db002",
+            IP_DB2,
+            PrimaryHealthBuilder::new()
+                .with_synchronous_standby_names("ANY 1 (db002, db003)")
+                .build(),
+        );
+
+        let db3 = replica_following(3, "db003", IP_DB1, 11);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        // db002 has no followers -> quorum unsatisfied
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::PrimaryQuorumUnsatisfied { primary, required: 1, observed: 0 }
+                if primary == "db002"
+        )));
+
+        // db001 has db003 following -> quorum satisfied; no finding for db001
+        assert!(!info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::PrimaryQuorumUnsatisfied { primary, .. }
+                if primary == "db001"
+        )));
     }
 }
