@@ -121,6 +121,8 @@ impl ReplicationLink {
     }
 }
 
+const WEAKENED_SYNCHRONOUS_COMMIT: [&str; 4] = ["local", "off", "remote_write", ""];
+
 /// Resolve a split-brain scenario by determining the true primary.
 ///
 /// Resolution strategy:
@@ -154,6 +156,23 @@ pub(super) fn resolve_split_brain(
             nodes: mismatched_nodes,
         }]
     };
+
+    for p in primaries {
+        let Some(h) = p.role.as_primary() else {
+            continue;
+        };
+        let v = h
+            .configuration
+            .get("synchronous_commit")
+            .map_or("", String::as_str);
+
+        if WEAKENED_SYNCHRONOUS_COMMIT.contains(&v) {
+            findings.push(SplitBrainFinding::SynchronousCommitWeakened {
+                primary: p.node_name.clone(),
+                value: v.to_owned(),
+            });
+        }
+    }
 
     let (replicas_following, following_findings) =
         build_replica_following_map(&timeline_info, filtered_replicas.as_slice());
@@ -586,7 +605,10 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
-    use crate::v2::tests_common::{NodeBuilder, PrimaryHealthBuilder, ReplicaHealthBuilder};
+    use crate::v2::{
+        scan::health_check_primary::PrimaryHealthCheckResult,
+        tests_common::{NodeBuilder, PrimaryHealthBuilder, ReplicaHealthBuilder},
+    };
 
     use chrono::{DateTime, Utc};
     use pretty_assertions::assert_eq;
@@ -597,6 +619,13 @@ mod tests {
             .with_id(id)
             .with_ip(ip)
             .with_primary(PrimaryHealthBuilder::new().with_timeline(timeline).build())
+            .build()
+    }
+
+    fn primary_with_health(id: u32, name: &str, health: PrimaryHealthCheckResult) -> AnalyzedNode {
+        NodeBuilder::new(name)
+            .with_id(id)
+            .with_primary(health)
             .build()
     }
 
@@ -1301,5 +1330,36 @@ mod tests {
         assert_eq!(info.primaries_with_highest_timeline.len(), 2);
         assert_eq!(info.primaries_with_lower_timeline.len(), 1);
         assert_eq!(info.primaries_with_lower_timeline[0].0.node_name, "db001");
+    }
+
+    #[test]
+    fn synchronous_commit_weakened_refuses() {
+        let db1 = primary_with_health(
+            1,
+            "db001",
+            PrimaryHealthBuilder::new()
+                .with_synchronous_commit("remote_write")
+                .build(),
+        );
+        let db2 = primary(2, "db002", IP_DB2, 12);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[]);
+
+        assert_eq!(info.confidence, Confidence::Refuse);
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::SynchronousCommitWeakened { primary, value }
+            if primary == "db001" && value == "remote_write"
+        )));
+    }
+
+    #[test]
+    fn synchronous_commit_on_does_not_refuse() {
+        // Both default to synchronous_commit = "on"
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary(2, "db002", IP_DB2, 12);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[]);
+        assert_ne!(info.confidence, Confidence::Refuse);
     }
 }
