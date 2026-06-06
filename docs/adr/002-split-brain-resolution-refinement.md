@@ -98,7 +98,7 @@ The `SystemIdentifierMismatch { nodes }` finding's `nodes` payload names every n
 Exclusion and Refuse are orthogonal: exclusion prevents a foreign-cluster replica from acting as the deciding vote in the default timeline-based pick; Refuse tells the operator not to act on that pick regardless.
 
 Not Refuse-worthy:
-- `synchronous_standby_names` inconsistency across primaries — surface as `SyncStandbyNamesDiverged` finding, do not refuse.
+- `synchronous_standby_names` inconsistency across primaries — detection deferred (see Out of scope). Not Refuse-worthy regardless: each primary evaluates its own SSN locally, so divergence cannot break the per-primary quorum reasoning the resolver depends on.
 
 ### 3. Confidence states
 
@@ -128,7 +128,6 @@ v1 finding categories:
 
 - `SystemIdentifierMismatch { nodes }` — sanity gate
 - `SynchronousCommitWeakened { primary, value }` — sanity gate
-- `SyncStandbyNamesDiverged { primaries }` — informational, not Refuse
 - `ReplicaWalReceiverStale { replica, claimed_sender }` — gate rejected stale replica-side evidence
 - `PrimaryDoesNotSeeReplica { primary, replica }` — one-sided claim rejected
 - `BidirectionalFlushingConfirmed { primary, replica }` — positive corroboration
@@ -225,6 +224,7 @@ When `DivergentReplicaWal` is present, §4's short-string contract item 4 mandat
 - Cross-cluster signals (Pacemaker, etcd, VIP state).
 - Topologies with >2 replicas. Resolver assumes 1+2.
 - Hostname-form `primary_conninfo`. Current production uses IPs; flag as known limitation.
+- `SyncStandbyNamesDiverged` finding emission. Detecting *policy* divergence (method/count/effective member set) requires normalization, because in this cluster's topology each primary's SSN structurally excludes itself — so the naive string compare fires on every split-brain even when the policy is identical (`ANY 1 (db002, db003)` on db001 vs. `ANY 1 (db001, db003)` on db002 is the same policy, different strings). Revisit when an actual SSN-drift incident demonstrates the need; until then the cost of getting the comparison right exceeds the value of an informational-only finding.
 - Visual/layout polish for the report (colorization, column ordering, table styling). The *information content* mandated by §4's short-string contract is in scope; how it's visually formatted is not.
 
 ## Consequences
