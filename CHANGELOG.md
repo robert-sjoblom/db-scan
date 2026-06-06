@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0](https://github.com/robert-sjoblom/db-scan/compare/v0.3.0...v0.4.0) (2026-06-06)
+
+
+### Features
+
+* **analyze:** flag primaries that cannot satisfy sync quorum ([c4cabbb](https://github.com/robert-sjoblom/db-scan/commit/c4cabbbf9daced2605156995fd2311b8de350f08))
+* **analyze:** refuse to resolve split-brain when sysids disagree ([#59](https://github.com/robert-sjoblom/db-scan/issues/59)) ([5050ba2](https://github.com/robert-sjoblom/db-scan/commit/5050ba2a8bfbfa4363771807a3335af5084ee84c))
+* **analyze:** refuse to resolve when synchronous commit is weakened ([22fc98d](https://github.com/robert-sjoblom/db-scan/commit/22fc98d7efacaabe4c9b38e0a48e2addb2979499))
+* **analyze:** require live, bidirectional streaming in split-brain gate ([#60](https://github.com/robert-sjoblom/db-scan/issues/60)) ([e71ec49](https://github.com/robert-sjoblom/db-scan/commit/e71ec4903938909960d90a3c6f42a02540a3e7ab))
+* Remote capture: persist per-run pipeline state to internal postgres ([#57](https://github.com/robert-sjoblom/db-scan/issues/57)) ([b6d3c4b](https://github.com/robert-sjoblom/db-scan/commit/b6d3c4b9db433b793cc2db618da7c630f1c46c3c))
+
+
+### Bug Fixes
+
+* **analyze:** stop quorum-unsatisfied findings from refusing own resolution ([87e51e5](https://github.com/robert-sjoblom/db-scan/commit/87e51e58496e4ae3280fc7efcf7326aacbb7595f))
+
 ## [0.3.0](https://github.com/robert-sjoblom/db-scan/compare/v0.2.3...v0.3.0) (2026-05-25)
 
 
