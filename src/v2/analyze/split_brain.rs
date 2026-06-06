@@ -87,9 +87,6 @@ pub enum SplitBrainFinding {
         primary: NodeName,
         value: String,
     },
-    SyncStandbyNamesDiverged {
-        primaries: Vec<NodeName>,
-    },
     ReplicaWalReceiverStale {
         replica: NodeName,
         claimed_sender: NodeName,
@@ -403,8 +400,7 @@ fn determine_confidence_level(finding: &SplitBrainFinding) -> Confidence {
         SplitBrainFinding::ReplicaWalReceiverStale { .. }
         | SplitBrainFinding::PrimaryDoesNotSeeReplica(_)
         | SplitBrainFinding::ReplicaInCatchup(_) => Confidence::Conflicting,
-        SplitBrainFinding::BidirectionalFlushingConfirmed(_)
-        | SplitBrainFinding::SyncStandbyNamesDiverged { .. } => Confidence::BestEffort,
+        SplitBrainFinding::BidirectionalFlushingConfirmed(_) => Confidence::BestEffort,
     }
 }
 
@@ -785,10 +781,6 @@ mod tests {
     )]
     #[case::bidirectional_flushing_confirmed(
         SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new("db001", "db003")),
-        Confidence::BestEffort
-    )]
-    #[case::sync_standby_names_diverged(
-        SplitBrainFinding::SyncStandbyNamesDiverged { primaries: vec!["db001".to_owned(), "db002".to_owned()] },
         Confidence::BestEffort
     )]
     fn finding_to_confidence(#[case] input: SplitBrainFinding, #[case] expected: Confidence) {
