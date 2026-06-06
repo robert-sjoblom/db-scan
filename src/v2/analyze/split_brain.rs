@@ -380,10 +380,11 @@ fn determine_true_primary(
 
     split_brain_info.findings.extend_from_slice(findings);
 
+    let true_primary = split_brain_info.true_primary.as_str();
     let confidence = split_brain_info
         .findings
         .iter()
-        .map(determine_confidence_level)
+        .map(|f| determine_confidence_level(f, true_primary))
         .min()
         .unwrap_or(Confidence::BestEffort);
 
@@ -391,12 +392,22 @@ fn determine_true_primary(
     split_brain_info
 }
 
-fn determine_confidence_level(finding: &SplitBrainFinding) -> Confidence {
+fn determine_confidence_level(finding: &SplitBrainFinding, true_primary: &str) -> Confidence {
     match finding {
         SplitBrainFinding::SystemIdentifierMismatch { .. }
         | SplitBrainFinding::SynchronousCommitWeakened { .. }
-        | SplitBrainFinding::PrimaryQuorumUnsatisfied { .. }
         | SplitBrainFinding::DivergentReplicaWal { .. } => Confidence::Refuse,
+        // A quorum-blocked primary cannot have ack'd writes. When it's a stale
+        // primary, that's the proof behind the resolution -- benign. When it's
+        // the primary we elected, we're keeping one that can't currently ack:
+        // shaky, but not a safety-model break, so Conflicting rather than Refuse.
+        SplitBrainFinding::PrimaryQuorumUnsatisfied { primary, .. } => {
+            if primary == true_primary {
+                Confidence::Conflicting
+            } else {
+                Confidence::BestEffort
+            }
+        }
         SplitBrainFinding::ReplicaWalReceiverStale { .. }
         | SplitBrainFinding::PrimaryDoesNotSeeReplica(_)
         | SplitBrainFinding::ReplicaInCatchup(_) => Confidence::Conflicting,
@@ -747,15 +758,25 @@ mod tests {
     #[rstest]
     #[case::system_identifier_mismatch(
         SplitBrainFinding::SystemIdentifierMismatch { nodes: vec!["db003".to_owned()] },
+        "db001",
         Confidence::Refuse
     )]
     #[case::synchronous_commit_weakened(
         SplitBrainFinding::SynchronousCommitWeakened { primary: "db001".to_owned(), value: "remote_write".to_owned() },
+        "db001",
         Confidence::Refuse
     )]
-    #[case::primary_quorum_unsatisfied(
+    // Quorum-unsatisfied on a *stale* primary is the proof behind the resolution -> benign.
+    #[case::primary_quorum_unsatisfied_stale(
+        SplitBrainFinding::PrimaryQuorumUnsatisfied { primary: "db002".to_owned(), required: 1, observed: 0 },
+        "db001",
+        Confidence::BestEffort
+    )]
+    // Quorum-unsatisfied on the *elected* primary means we're keeping one that can't ack -> Conflicting.
+    #[case::primary_quorum_unsatisfied_elected(
         SplitBrainFinding::PrimaryQuorumUnsatisfied { primary: "db001".to_owned(), required: 1, observed: 0 },
-        Confidence::Refuse
+        "db001",
+        Confidence::Conflicting
     )]
     #[case::divergent_replica_wal(
         SplitBrainFinding::DivergentReplicaWal {
@@ -765,26 +786,35 @@ mod tests {
             fork_tli: 2,
             fork_lsn: "0/3000000".to_owned(),
         },
+        "db001",
         Confidence::Refuse
     )]
     #[case::replica_wal_receiver_stale(
         SplitBrainFinding::ReplicaWalReceiverStale { replica: "db003".to_owned(), claimed_sender: "db001".to_owned() },
+        "db001",
         Confidence::Conflicting
     )]
     #[case::primary_does_not_see_replica(
         SplitBrainFinding::PrimaryDoesNotSeeReplica(ReplicationLink::new("db001", "db003")),
+        "db001",
         Confidence::Conflicting
     )]
     #[case::replica_in_catchup(
         SplitBrainFinding::ReplicaInCatchup(ReplicationLink::new("db001", "db003")),
+        "db001",
         Confidence::Conflicting
     )]
     #[case::bidirectional_flushing_confirmed(
         SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new("db001", "db003")),
+        "db001",
         Confidence::BestEffort
     )]
-    fn finding_to_confidence(#[case] input: SplitBrainFinding, #[case] expected: Confidence) {
-        let actual = determine_confidence_level(&input);
+    fn finding_to_confidence(
+        #[case] input: SplitBrainFinding,
+        #[case] true_primary: &str,
+        #[case] expected: Confidence,
+    ) {
+        let actual = determine_confidence_level(&input, true_primary);
         assert_eq!(actual, expected);
     }
 
@@ -1465,6 +1495,72 @@ mod tests {
             f,
             SplitBrainFinding::PrimaryQuorumUnsatisfied { primary, .. }
                 if primary == "db001"
+        )));
+    }
+
+    #[test]
+    fn quorum_unsatisfied_on_stale_primary_does_not_refuse() {
+        // db002 has the higher timeline but is isolated: it requires db003 as a
+        // sync standby, yet db003 is streaming from db001. db001 is the elected
+        // primary, so db002's unsatisfied quorum is the proof behind the
+        // resolution -- it must not drag the verdict to Refuse.
+        let db1 = primary_with_followers(1, "db001", IP_DB1, 11, &["db003"]);
+        let db2 = primary_with_health(
+            2,
+            "db002",
+            IP_DB2,
+            PrimaryHealthBuilder::new()
+                .with_timeline(12)
+                .with_synchronous_standby_names("ANY 1 (db003)")
+                .build(),
+        );
+        let db3 = replica_following(3, "db003", IP_DB1, 11);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert_eq!(info.true_primary, "db001");
+        assert_eq!(
+            info.confidence,
+            Confidence::BestEffort,
+            "{:#?}",
+            info.findings
+        );
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::PrimaryQuorumUnsatisfied { primary, .. }
+                if primary == "db002"
+        )));
+    }
+
+    #[test]
+    fn quorum_unsatisfied_on_elected_primary_is_conflicting() {
+        // No replica evidence, so the resolver trusts timeline and elects the
+        // higher-TL db002. But db002 requires a sync standby it doesn't have, so
+        // we're keeping a primary that can't currently ack -> Conflicting.
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary_with_health(
+            2,
+            "db002",
+            IP_DB2,
+            PrimaryHealthBuilder::new()
+                .with_timeline(12)
+                .with_synchronous_standby_names("ANY 1 (db003)")
+                .build(),
+        );
+
+        let info = resolve_split_brain(&[&db1, &db2], &[]);
+
+        assert_eq!(info.true_primary, "db002");
+        assert_eq!(
+            info.confidence,
+            Confidence::Conflicting,
+            "{:#?}",
+            info.findings
+        );
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::PrimaryQuorumUnsatisfied { primary, .. }
+                if primary == "db002"
         )));
     }
 }
