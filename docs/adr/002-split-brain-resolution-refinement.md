@@ -4,7 +4,11 @@
 
 Proposed (2026-05-19). Incorporates five rounds of agent review.
 
+**Revision (2026-06-07):** §7 (Divergent-WAL) reworked. The original framing treated `DivergentReplicaWal` as a replica-rebuild pointer anchored to the higher-TL primary's fork; that is wrong in two ways — it mis-states the remediation direction and, in the genuinely dangerous case, isn't even observable with the data the original §5 collects. The finding is a **committed-write-divergence safety gate** (→ `Refuse`); the correct remediation is **keep the lower TL, discard/rebuild the higher TL**; and detecting the dangerous case reliably needs control-file evidence we do not yet capture. See the revised §7, the new case-matrix row C-g, and the `DivergentReplicaWal` deferral. We have **no captured run** of the dangerous state, so the precise trigger and the verdict-flip are deferred until designed from real data; a conservative `Refuse`-only floor is shippable today (§7).
+
 ## Context
+
+> **Background:** for the domain model this ADR assumes — timeline forks, why "divergent" is branch-relative, why flushed-past-fork implies acknowledged writes, and the verdict-vs-safety split — see [docs/concepts/split-brain.md](../concepts/split-brain.md). This ADR records *decisions*; that doc explains the *concepts*.
 
 `src/v2/analyze/split_brain.rs` resolves split-brain by comparing timelines and checking which primary a replica's `wal_receiver.sender_host` points at. The check is too permissive: a `sender_host` match alone counts as "following," even when the streaming connection is dead and the row is stale.
 
@@ -36,16 +40,18 @@ Whether `db001` is actively committing depends entirely on whether `db003` is fl
 |---|---|---|---|---|---|
 | C-a | `sender_host=db002`, `status=streaming/catchup`, recent receipt | Yes, for `db002` | No (no replica acking it) | `db002` | `Both` (timeline + flushing replica agree) + `BidirectionalFlushingConfirmed(db002, db003)` + `PrimaryQuorumUnsatisfied(db001)` |
 | C-b | `sender_host=db001`, `status=streaming/catchup`, recent receipt, `received_tli=N` | Yes, for `db001` | Yes | **`db001`** — flushing-replica evidence makes this correct under the operational definition | `LowerTimelineHasQuorum` + `BidirectionalFlushingConfirmed(db001, db003)` + `PrimaryQuorumUnsatisfied(db002)` |
-| C-c | Same as C-b, but `db003`'s `flushed_lsn` is past the TL=N→N+1 fork LSN | Yes, for `db001` | Yes | **`db001`** (same as C-b) | C-b verdict + separate top-level `DivergentReplicaWal(db003, …)` |
+| C-c | Same as C-b, but `db003`'s `flushed_lsn` is past the TL=N→N+1 fork LSN | Yes, for `db001` | Yes | **`db001`** (same as C-b) | C-b verdict (already keeps lower TL = correct direction). `DivergentReplicaWal(db003, …)` is **informational, not Refuse**: in this 3-node cluster `db002`'s only candidate acker is `db003`, and `db003` is observably acking `db001` on TL=N, so `db002` provably client-acked nothing on TL=N+1 (`sync_commit=on`). Its fork is empty → fencing `db002` is safe and the verdict is confident. |
 | C-d | `sender_host=db001` but `status ≠ streaming/catchup`, OR `last_msg_receipt_time` aged out | No — gate rejects | No (without `db003` acking, `db001` can't satisfy its quorum) | `db002` | `HigherTimeline` (no flushing replica anywhere) + `ReplicaWalReceiverStale(db003, db001)` |
 | C-e | `sender_host=db002`, actively flushing for `db002`, but `db001`'s `pg_stat_replication` still has a stale row for `db003` (within `wal_sender_timeout` of disconnect) | Yes, for `db002` | No (`db001`'s claimed replica is actually elsewhere) | `db002` | `Both` (replica's `wal_receiver` is authoritative; `db001`'s stale `pg_stat_replication` row is filtered because the replica-side match fails first) + `BidirectionalFlushingConfirmed(db002, db003)` |
 | C-f | `wal_receiver` absent, or `status=stopped/starting`, or blocked on `restore_command` (archive corruption) | No | No (without `db003`, `db001`'s quorum is unsatisfied) | `db002` | `HigherTimeline`; replica-stuck condition surfaced separately (existing archive-failure mechanism) |
+| **C-g** (the dangerous case) | `db003` flushed past the fork on TL=N **while acking `db001`**, but has since been re-pointed at `db002` (TL=N+1) and is **wedged** — it cannot roll forward (its committed TL=N tail past X diverges from TL=N+1) and likely cannot establish a `wal_receiver` at all | No, **now** (but it *did* ack TL=N writes past X earlier) | No, **now** (lost its acker) | **`db001`** — it holds acked writes that exist nowhere else | **Resolver mis-picks `HigherTimeline` → `db002`**, because at scan time no replica is live-following anyone. Acting on that demotes `db001` and **destroys acknowledged transactions.** `DivergentReplicaWal(db003) → Refuse` must override the pick. **Detectability gap:** a wedged replica with no `wal_receiver` exposes no `received_tli`/`flushed_lsn`, so the §5-as-original data cannot prove "past fork" — see §7's capture requirement. |
 
 The design's correctness rests on three facts visible in the matrix:
 
 1. C-b and C-c are correctly resolved by the renamed `LowerTimelineHasQuorum` variant once the gate has confirmed `db003` is actively flushing for `db001`. The lower-TL primary is the true one *because* a replica is genuinely flushing for it.
 2. C-d, C-e, and the inactive subcases of C-f require the gate to *reject* stale/one-sided evidence that the current code accepts. This is what the gate adds.
 3. The verdict in C-b/C-c is the same whether the higher-TL primary (`db002`) is quorum-satisfied or not — but flagging `PrimaryQuorumUnsatisfied(db002)` in the findings tells the operator "the failover hasn't completed: the new primary has no replicas yet."
+4. C-g is the case the original design missed. The acked writes live on the **lower** TL, but at scan time the lower-TL primary has no *live* follower (its acker wandered off and wedged), so the resolver's live-follower logic falls through to `HigherTimeline` and picks the wrong primary. The only thing standing between that pick and acknowledged-data loss is `DivergentReplicaWal → Refuse`. This is the load-bearing case for the finding — and the one we cannot yet reliably observe (§7).
 
 **Gate precedence is asymmetric, not symmetric AND:** the replica's `wal_receiver` is the authoritative side (it names exactly one sender). The primary's `pg_stat_replication` is corroborating only. If the replica-side gate fails for primary X, no amount of primary-side state on X can rescue the match. This is what makes C-e resolve cleanly — `db001`'s stale row is filtered because `db003`'s `wal_receiver` doesn't name `db001`.
 
@@ -147,10 +153,12 @@ v1 finding categories:
 
 Operator-facing output (`reason.short`) must surface enough information for incident triage. The following are mandated, not polish — without them the design has no operational effect even when the resolver is internally correct:
 
-1. **`Confidence::Refuse` overrides the resolution variant in the short string.** Lead with `REFUSE/` and name the failed sanity gate (e.g. `REFUSE/SplitBrain: system_identifier mismatch (db003 vs db001/db002)`). The resolution-variant text MUST NOT appear when Refuse fires, to prevent operators from acting on a winner pick that is not actionable. **Carve-out:** `DivergentReplicaWal` (item 4) is orthogonal to whether the timeline-pick is actionable; if both Refuse and DivergentReplicaWal apply, the rebuild instruction still surfaces, concatenated after the Refuse text (e.g. `REFUSE/SplitBrain: system_identifier mismatch (db003) | rebuild db003 from db001`).
+1. **`Confidence::Refuse` overrides the resolution variant in the short string.** Lead with `REFUSE/` and name the failed sanity gate (e.g. `REFUSE/SplitBrain: system_identifier mismatch (db003 vs db001/db002)`). The resolution-variant text MUST NOT appear when Refuse fires, to prevent operators from acting on a winner pick that is not actionable. **Carve-out (deferred 2026-06-07 — see §7):** `DivergentReplicaWal` was to surface inline even under Refuse, with a rebuild instruction. That is deferred along with the finding's detection; nothing emits it today, so the carve-out is dormant.
 2. **`LowerTimelineHasQuorum` short string MUST name the action**, not the mechanism. Acceptable: `SplitBrain: db001 has quorum (lower TL=N), fence db002 (TL=N+1, quorum-blocked)`. Not acceptable: `SplitBrain: replica overrides timeline (N < N+1)` — that phrasing is paradox-shaped and was the trigger for the rename in the first place.
 3. **`PrimaryQuorumUnsatisfied` MUST appear inline in the short string** when present, since it explains why the higher-TL primary lost. Without it the verdict reads as a paradox.
-4. **`DivergentReplicaWal`, when present, MUST surface inline in the SplitBrain short string** (concatenated after the resolution-variant text, e.g. with ` | `), and MUST name the remediation: `rebuild <replica> from <true-primary>`. Evidence-only phrasing ("divergent WAL past fork @ LSN") is insufficient — it reads as background context and operators may reattach the divergent replica via `repmgr standby follow`, leaving silent corruption. The action verb is **rebuild** (tear down + new basebackup), not pg_rewind; the choice between basebackup-from-archive vs. fresh basebackup is operator judgment based on archive integrity and is not encoded in the tool's output.
+4. **`DivergentReplicaWal`, when present, MUST surface inline in the SplitBrain short string** and MUST set `Confidence::Refuse`. **(Revised 2026-06-07.)** The original text mandated a remediation string `rebuild <replica> from <true-primary>`. That is now deferred, for two reasons:
+   - **Direction.** The correct remediation is to **keep the lower TL and discard/rebuild the higher TL** — the lower-TL primary holds the acknowledged writes; the higher-TL primary was isolated and (by the cluster's quorum-sync invariant) committed nothing on its fork. So the node to rebuild is the *higher-TL primary* (and the divergent replica re-points onto the lower-TL true primary), not "the replica, from whatever the resolver currently calls true-primary." The template only produces the right instruction once the resolver actually names the **lower-TL** node as `true_primary` — which today it does not in C-g (it mis-picks `HigherTimeline`). Emitting a rebuild *direction* before that verdict-flip exists would print a backwards, data-destroying instruction.
+   - **Until then, surface evidence + `Refuse`, not an action.** Render the raw facts inline — e.g. `REFUSE/SplitBrain: divergent committed WAL — db003 flushed past TL=N fork @ <lsn>; acked writes may exist only on lower TL` — and stop. This still prevents the silent-corruption path (an operator who sees `Refuse` + "acked writes diverged" will not blindly `repmgr standby follow`), without asserting a remediation the tool cannot yet substantiate. The rebuild verb (tear down + basebackup, not pg_rewind; archive-vs-fresh is operator judgment) returns once the verdict-flip lands (§7).
 5. **`SystemIdentifierMismatch` and `SynchronousCommitWeakened` are escalation-worthy** independent of the split-brain verdict; they should drive an alerting path distinct from routine SplitBrain rendering.
 
 Phrasing is implementation detail; the *minimum information content* listed above is spec.
@@ -167,7 +175,7 @@ Phrasing is implementation detail; the *minimum information content* listed abov
 
 Findings concatenation:
 - `PrimaryQuorumUnsatisfied` is the source of the "quorum unsatisfied/blocked/no live replicas" inline text and is consumed by the template above, not separately appended.
-- `DivergentReplicaWal`, if present, is appended after the resolution text with ` | rebuild <replica> from <true-primary>`.
+- `DivergentReplicaWal` rendering is deferred (§7); nothing emits it today. When it returns it must follow §7's corrected direction (keep lower TL / rebuild the higher-TL node), not the original "rebuild `<replica>` from `<true-primary>`".
 - Other findings appear in `details_json`, not in `short`.
 
 ### 5. New data to collect
@@ -198,6 +206,11 @@ Additions to `HEALTH_CHECK_PRIMARY_QUERY`:
 Additions to `HEALTH_CHECK_REPLICA_QUERY`:
 
 - `system_identifier::text` from `pg_control_system()` — for cross-node sanity gate. (Replicas inherit `system_identifier` from their basebackup source; mismatch detects a replica reseeded from a foreign cluster.)
+- **(Added 2026-06-07, for §7 capture-first.)** The replica's **absolute applied/received LSN**. We *already* capture the control-file timeline (`timeline_id` via `pg_control_checkpoint()`), but today the only LSN we keep is the *difference* `pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())` stored as `lag.apply_lag_bytes` — the gap, not the positions. Add the absolute values:
+  - `pg_last_wal_replay_lsn()` — applied position, from the replica's own recovery state (present even with no live receiver).
+  - `pg_last_wal_receive_lsn()` — received/flushed position (the ack-relevant one under `synchronous_commit=on`; may be stale or `0/0` when no receiver is running).
+
+  Rationale: a timeline-wedged replica (matrix C-g) may have **no `wal_receiver` row**, so `received_tli`/`flushed_lsn` are unavailable — exactly the state we most need. The control-file `timeline_id` (already captured) plus an absolute applied LSN let us place the replica relative to a primary's fork LSN even with no live receiver. *Capture only* for now (§7): gather the evidence so the next real C-g is diagnosable; no detection is wired off it yet.
 
 Other:
 
@@ -207,13 +220,23 @@ Other:
 
 Future enhancement: re-scan after ≥ `wal_sender_timeout`. If primary set, timelines, follower map, and `pg_replication_slots.active` set are unchanged, promote `BestEffort` to `Verified`. Out of scope for this ADR.
 
-### 7. Divergent-WAL as a separate finding
+### 7. Divergent-WAL detection — deferred; capture-first (revised 2026-06-07)
 
-`DivergentReplicaWal { replica_node, replica_received_tli, replica_flushed_lsn, fork_tli, fork_lsn }` — emitted as **both** a top-level finding on the broader analyze report AND included in `SplitBrainInfo.findings` when a split-brain verdict is being produced. The dual emission is so the writer's `format_reason` for the `SplitBrain` reason has direct access (the writer currently sees only the `SplitBrainInfo`, not top-level findings; duplicating the finding avoids a signature change to `format_reason`).
+`DivergentReplicaWal { replica_node, replica_received_tli, replica_flushed_lsn, fork_tli, fork_lsn }` stays a defined finding variant, but its **detection, confidence handling, and remediation are deferred.** The original spec — emit when a replica's `received_tli` < highest primary TL and `flushed_lsn` is past the *higher-TL primary's* fork LSN, map to `Refuse`, render "rebuild from true-primary" — was wrong on several counts that review surfaced:
 
-Triggered when a replica's `received_tli` is older than the cluster's highest primary TL AND its `flushed_lsn` is past the corresponding fork LSN. The fork LSN is read from the **higher-TL primary's** timeline-history file (which records the previous timeline's switch-LSN), parsed client-side. History file format is tab-separated `<previous_tli>\t<switch_lsn>\t<reason>` per line; ignore lines beginning with `#`.
+**What the finding actually means.** A replica's `flushed_lsn` past the fork on the lower timeline is *proof of acknowledged writes* on that timeline: under `synchronous_commit = on`, the lower-TL primary does not ack a client commit until the standby has flushed it (weakened `synchronous_commit` is a separate Refuse gate, §2). So the finding detects **committed-write divergence** — acknowledged transactions that exist on the lower TL and that the higher-TL primary lacks. It is a safety signal, not a "which replica do I rebuild" pointer.
 
-When `DivergentReplicaWal` is present, §4's short-string contract item 4 mandates the rebuild remediation surfaces inline (this is what the dual emission enables).
+**Correct remediation direction: keep the lower TL, discard/rebuild the higher TL.** The higher-TL primary was isolated (no acker) and, by the cluster's quorum-sync invariant, committed nothing on its fork — it is the empty branch. The lower-TL primary holds the acknowledged writes. So the node to rebuild is the *higher-TL primary*, and the divergent replica re-points onto the *lower-TL* true primary. The original "rebuild `<replica>` from `<true-primary>`" inverts this whenever the resolver names the higher-TL node as `true_primary`.
+
+**It requires a verdict-flip, not just a finding.** The dangerous case (matrix row C-g) is when the lower-TL primary's acker has wandered off, so at scan time no replica is live-following anyone and the resolver falls through to `HigherTimeline` → picks the higher TL → demoting it destroys the acked writes. The finding must drive the verdict toward lower-TL-canonical (or, failing that, force `Refuse`), not ride along as a footnote on a `HigherTimeline` pick.
+
+**The 3-node proof — and why `Refuse` hinges on observability.** In the split-brain scope there are exactly two candidate primaries and one replica (db003). db002's quorum can be satisfied *only* by db003 (a peer primary is not its standby; a primary is not its own). So "is db002's fork empty of acked writes?" reduces to "is db003 acking db002?" — and a replica is on one timeline at a time. Therefore:
+- When db003's allegiance is **observable** (e.g. C-c: streaming db001 on TL=N), we can *prove* db002's fork is empty and give a **confident** "keep db001, fence db002" verdict — no Refuse.
+- `Refuse` is correct only when db003's allegiance is **unprovable** — the wedged C-g state.
+
+**Why detection is deferred (the data gap).** The original trigger reads `received_tli`/`flushed_lsn` from `pg_stat_wal_receiver`. But a timeline-wedged replica (C-g — the case that matters) likely has *no* `wal_receiver` at all: it cannot establish streaming past the fork. So the original trigger fires in the provably-*safe* case (C-c) and misses the *dangerous* one (C-g) — data-loss danger and `wal_receiver`-based detectability are **anti-correlated**. And we have **no captured run** of the wedged state, so we don't actually know what it exposes. Shipping the trigger now would add over-caution to safe cases and false confidence to the dangerous one, which is why no conservative "Refuse-only floor" is shipped in the interim.
+
+**Decision: capture-first.** Collect db003's timeline and applied LSN from the **control file**, independent of `wal_receiver` (§5), so the wedged state becomes observable and the next real C-g is diagnosable. Defer the `DivergentReplicaWal` emission, its confidence mapping, and the verdict-flip until designed from a captured occurrence. The `DivergentReplicaWal` variant already maps to `Confidence::Refuse` in `determine_confidence_level`, so nothing emits it today — that wiring stays dormant until the detection is built from real data.
 
 ## Out of scope
 
