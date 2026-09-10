@@ -31,6 +31,8 @@ type NodeName = String;
 
 pub type SplitBrainInfo = crate::v2::analyze::split_brain::SplitBrainInfo;
 pub type SplitBrainResolution = crate::v2::analyze::split_brain::SplitBrainResolution;
+pub type SplitBrainFinding = crate::v2::analyze::split_brain::SplitBrainFinding;
+pub type Confidence = crate::v2::analyze::split_brain::Confidence;
 
 mod checks;
 mod classify;

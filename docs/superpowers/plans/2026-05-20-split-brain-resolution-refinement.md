@@ -84,7 +84,7 @@ Not implemented; recorded so the eventual follow-up starts from the corrected de
 - Modify: `src/v2/writer/build.rs:528-564` — the `Reason::SplitBrain` arm of `format_reason`
 - Possibly: `src/v2/writer/view.rs` — if `ReasonView` needs new fields (likely not; should fit in `short`)
 
-- [ ] **Replace the existing match arm.** Sketch (adapt to the actual surrounding signatures):
+- [x] **Replace the existing match arm.** Sketch (adapt to the actual surrounding signatures):
 
 ```rust
 Reason::SplitBrain(info) => {
@@ -100,7 +100,7 @@ Reason::SplitBrain(info) => {
 }
 ```
 
-- [ ] **Helper: `format_refuse`** picks the first sanity-gate finding:
+- [x] **Helper: `format_refuse`** picks the first sanity-gate finding:
 
 ```rust
 fn format_refuse(info: &SplitBrainInfo) -> String {
@@ -117,7 +117,7 @@ fn format_refuse(info: &SplitBrainInfo) -> String {
 }
 ```
 
-- [ ] **Helper: `format_resolution`** — per the §4 mapping table:
+- [x] **Helper: `format_resolution`** — per the §4 mapping table:
 
 ```rust
 fn format_resolution(info: &SplitBrainInfo) -> String {
@@ -154,7 +154,7 @@ fn format_resolution(info: &SplitBrainInfo) -> String {
 
 - [ ] ~~**Helper: `find_divergent_replica_wal`**~~ — deferred (§7); no `DivergentReplicaWal` rendering in this commit.
 
-- [ ] **Tests** in `writer/build.rs`:
+- [x] **Tests** in `writer/build.rs`:
 
 ```rust
 #[test]
@@ -224,7 +224,7 @@ DivergentReplicaWal finding is surfaced inline with rebuild guidance.
 
 ## Post-implementation
 
-- [ ] Run `cargo clippy --all-targets` and fix lints on touched lines (per the `feedback_fix_clippy` memory).
+- [x] Run `cargo clippy --all-targets` and fix lints on touched lines (per the `feedback_fix_clippy` memory).
 - [ ] Decide whether the top-level `DivergentReplicaWal` finding emission (outside the SplitBrain reason) needs to land in this PR or a follow-up — the writer correctness is already satisfied by the dual-emission inside `SplitBrainInfo.findings`.
 
 ---
