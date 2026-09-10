@@ -242,6 +242,8 @@ pub(crate) mod tests_common {
         wal_receiver_status: String,
         last_msg_receipt_time: Option<DateTime<Utc>>,
         has_wal_receiver: bool,
+        last_wal_replay_lsn: Option<String>,
+        last_wal_receive_lsn: Option<String>,
     }
 
     impl ReplicaHealthBuilder {
@@ -259,6 +261,8 @@ pub(crate) mod tests_common {
                 wal_receiver_status: "streaming".to_owned(),
                 last_msg_receipt_time: Some(Utc::now()),
                 has_wal_receiver: true,
+                last_wal_replay_lsn: None,
+                last_wal_receive_lsn: None,
             }
         }
 
@@ -333,6 +337,8 @@ pub(crate) mod tests_common {
                 lag: self.lag,
                 conflicts_by_db: HashMap::new(),
                 configuration: HashMap::new(),
+                last_wal_receive_lsn: self.last_wal_receive_lsn,
+                last_wal_replay_lsn: self.last_wal_replay_lsn,
             }
         }
     }
