@@ -25,6 +25,12 @@ pub struct ReplicaHealthCheckResult {
     pub lag: LagInfo,
     pub conflicts_by_db: HashMap<String, i32>,
     pub configuration: HashMap<String, String>,
+    /// Applied position. Non-NULL on anything that has replayed, and can be
+    /// stale -- frozen at promotion on a former standby. See ADR-002 §7.
+    pub last_wal_replay_lsn: Option<String>,
+    /// Received position. Survives walreceiver death and promotion within one
+    /// postmaster, so `Some(_)` is a high-water mark, not a live position.
+    pub last_wal_receive_lsn: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
@@ -79,6 +85,8 @@ static HEALTH_CHECK_REPLICA_QUERY: &str = "SELECT jsonb_build_object(
                 pg_stat_wal_receiver
         ) t
     ),
+    'last_wal_replay_lsn', pg_last_wal_replay_lsn()::text,
+    'last_wal_receive_lsn', pg_last_wal_receive_lsn()::text,
     'lag', jsonb_build_object(
         'apply_lag_bytes', pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn()),
         'last_transaction_replay_at', pg_last_xact_replay_timestamp()
@@ -173,6 +181,8 @@ async fn execute_replica_health_check(client: &Client) -> anyhow::Result<Replica
     tracing::debug!(row = ?row, "replica health check query executed");
 
     let json_text: String = row.get(0);
+    tracing::debug!(text = %json_text, "Raw JSONB text result");
+
     let json_value: serde_json::Value = serde_json::from_str(&json_text)
         .map_err(errors::serde_err)
         .context("attempting: parse health-check JSONB as JSON value")?;
@@ -182,4 +192,76 @@ async fn execute_replica_health_check(client: &Client) -> anyhow::Result<Replica
     serde_json::from_value(json_value)
         .map_err(errors::serde_err)
         .context("attempting: deserialize ReplicaHealthCheckResult")
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    use crate::v2::scan::health_check_replica::ReplicaHealthCheckResult;
+
+    #[expect(
+        clippy::unreadable_literal,
+        reason = "verbatim capture from a live replica"
+    )]
+    fn replica_health_check_json() -> serde_json::Value {
+        json!({
+            "lag": {
+                "apply_lag_bytes": 0,
+                "last_transaction_replay_at": "2026-09-10T07:53:01.30842+02:00"
+            },
+            "timeline_id": 22,
+            "current_time": "2026-09-10T07:53:01.345293+02:00",
+            "wal_receiver": {
+                "pid": 2709535,
+                "status": "streaming",
+                "conninfo": "user=replicator passfile=/var/lib/pgsql/.pgpass channel_binding=prefer connect_timeout=2 dbname=replication host=10.81.12.151 port=5432 application_name=dev_pg_app001_db002 fallback_application_name=walreceiver sslmode=prefer sslcompression=0 sslsni=1 ssl_min_protocol_version=TLSv1.2 gssencmode=prefer krbsrvname=postgres target_session_attrs=any",
+                "slot_name": null,
+                "flushed_lsn": "6FD/8F96BC00",
+                "sender_host": "127.1.12.151",
+                "sender_port": 5432,
+                "written_lsn": "6FD/8F96BC00",
+                "received_tli": 22,
+                "latest_end_lsn": "6FD/8F96BC00",
+                "latest_end_time": "2026-09-10T07:53:01.309884+02:00",
+                "receive_start_lsn": "6FD/7D000000",
+                "receive_start_tli": 22,
+                "last_msg_send_time": "2026-09-10T07:53:01.309884+02:00",
+                "last_msg_receipt_time": "2026-09-10T07:53:01.312387+02:00"
+            },
+            "configuration": {
+                "hot_standby": "on",
+                "primary_conninfo": "user=replicator connect_timeout=2 host=10.81.12.151 port=5432 application_name=dev_pg_app001_db002",
+                "primary_slot_name": "",
+                "recovery_target_timeline": "latest"
+            },
+            "conflicts_by_db": {},
+            "system_identifier": "7233340535934352970",
+            "last_wal_replay_lsn": "6FD/8F96BC00",
+            "last_wal_receive_lsn": "6FD/8F96BC00"
+        })
+    }
+
+    #[test]
+    fn replica_health_check_result_deserializes() {
+        let result: ReplicaHealthCheckResult =
+            serde_json::from_value(replica_health_check_json()).unwrap();
+
+        assert_eq!(result.last_wal_replay_lsn.as_deref(), Some("6FD/8F96BC00"));
+        assert_eq!(result.last_wal_receive_lsn.as_deref(), Some("6FD/8F96BC00"));
+    }
+
+    #[test]
+    fn replica_health_check_handles_null_wal_positions() {
+        // PG17 returns SQL NULL, never 0/0, when the position is zero (xlogfuncs.c).
+        // Rare in practice (see ADR-002 §7), but a NULL must not fail the scan.
+        let mut json = replica_health_check_json();
+        json["last_wal_receive_lsn"] = serde_json::Value::Null;
+
+        let result: ReplicaHealthCheckResult = serde_json::from_value(json).unwrap();
+
+        assert_eq!(result.last_wal_receive_lsn, None);
+        assert_eq!(result.last_wal_replay_lsn.as_deref(), Some("6FD/8F96BC00"));
+    }
 }
