@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::v2::{
     analyze::{
-        AnalyzedCluster, ClusterHealth, ClusterVerdict, NodeVerdict, Reason, SplitBrainInfo,
-        SplitBrainResolution, Verdict,
+        AnalyzedCluster, ClusterHealth, ClusterVerdict, Confidence, NodeVerdict, Reason,
+        SplitBrainFinding, SplitBrainInfo, SplitBrainResolution, Verdict,
     },
     scan::{
         AnalyzedNode, disk_check::DiskCheckOutcome, health_check_primary::ReplicationConnection,
@@ -529,38 +529,7 @@ fn format_reason(reason: Reason, verdict: &Verdict) -> (String, String) {
             let Some(ClusterVerdict::SplitBrain(info)) = verdict.cluster_verdict() else {
                 return ("SplitBrain".to_owned(), "{}".to_owned());
             };
-            let resolution_str = match &info.resolution {
-                SplitBrainResolution::HigherTimeline {
-                    true_primary_timeline,
-                    stale_timeline,
-                } => format!("timeline {} > {}", true_primary_timeline, stale_timeline),
-                SplitBrainResolution::ReplicaFollowing { .. } => "replica evidence".to_owned(),
-                SplitBrainResolution::Both {
-                    true_primary_timeline,
-                    stale_timeline,
-                    ..
-                } => format!(
-                    "timeline {} > {} + replica",
-                    true_primary_timeline, stale_timeline
-                ),
-                SplitBrainResolution::LowerTimelineHasQuorum {
-                    true_primary_timeline,
-                    stale_timeline,
-                    ..
-                } => format!(
-                    "replica overrides timeline ({} < {})",
-                    true_primary_timeline, stale_timeline
-                ),
-                SplitBrainResolution::Indeterminate => "indeterminate".to_owned(),
-            };
-            let short = format!("SplitBrain: {}", resolution_str);
-            let details = serde_json::json!({
-                "true_primary": info.true_primary,
-                "stale_primaries": info.stale_primaries,
-                "resolution": format!("{:?}", info.resolution)
-            })
-            .to_string();
-            (short, details)
+            split_brain_reason(info)
         }
         Reason::WritesBlocked => ("WritesBlocked".to_owned(), "{}".to_owned()),
         Reason::WritesUnprotected => ("WritesUnprotected".to_owned(), "{}".to_owned()),
@@ -678,6 +647,85 @@ fn format_reason(reason: Reason, verdict: &Verdict) -> (String, String) {
     }
 }
 
+/// Short string and details JSON for a split-brain verdict, per ADR-002 §4.
+///
+/// Every finding is serialized into the details JSON; only the sanity gates and
+/// the resolution reach the operator-facing short string.
+fn split_brain_reason(info: &SplitBrainInfo) -> (String, String) {
+    let short = if matches!(info.confidence, Confidence::Refuse) {
+        format_refuse(info)
+    } else {
+        format_resolution(info)
+    };
+    let details = serde_json::to_string(info).unwrap_or_else(|_| "{}".to_owned());
+    (short, details)
+}
+
+/// Names the sanity gate that failed. The resolution text is suppressed so an
+/// operator cannot act on a winner pick the resolver refuses to stand behind.
+fn format_refuse(info: &SplitBrainInfo) -> String {
+    let gate = info
+        .findings
+        .iter()
+        .find_map(|finding| match finding {
+            SplitBrainFinding::SystemIdentifierMismatch { nodes } => {
+                Some(format!("system_identifier mismatch ({})", nodes.join(", ")))
+            }
+            SplitBrainFinding::SynchronousCommitWeakened { primary, value } => {
+                Some(format!("synchronous_commit={} on {}", value, primary))
+            }
+            SplitBrainFinding::ReplicaWalReceiverStale { .. }
+            | SplitBrainFinding::PrimaryDoesNotSeeReplica(_)
+            | SplitBrainFinding::BidirectionalFlushingConfirmed(_)
+            | SplitBrainFinding::ReplicaInCatchup(_)
+            | SplitBrainFinding::PrimaryQuorumUnsatisfied { .. }
+            | SplitBrainFinding::DivergentReplicaWal { .. } => None,
+        })
+        .unwrap_or_else(|| "sanity gate failed".to_owned());
+
+    format!("REFUSE/SplitBrain: {}", gate)
+}
+
+/// The variant-to-action mapping from ADR-002 §4: name the action to take, not the
+/// signal that decided it. The parenthetical on the stale primary is fixed per
+/// variant -- it reports the quorum state the variant already implies.
+fn format_resolution(info: &SplitBrainInfo) -> String {
+    let stale = info.stale_primaries.first().map_or("", String::as_str);
+
+    match &info.resolution {
+        SplitBrainResolution::Both {
+            true_primary_timeline,
+            stale_timeline,
+            ..
+        } => format!(
+            "SplitBrain: {} has quorum (TL={}), demote {} (TL={}, quorum unsatisfied)",
+            info.true_primary, true_primary_timeline, stale, stale_timeline
+        ),
+        SplitBrainResolution::LowerTimelineHasQuorum {
+            true_primary_timeline,
+            stale_timeline,
+            ..
+        } => format!(
+            "SplitBrain: {} has quorum (lower TL={}), fence {} (TL={}, quorum-blocked)",
+            info.true_primary, true_primary_timeline, stale, stale_timeline
+        ),
+        SplitBrainResolution::HigherTimeline {
+            true_primary_timeline,
+            stale_timeline,
+        } => format!(
+            "SplitBrain: {} has quorum (TL={}), demote {} (TL={}, no live replicas)",
+            info.true_primary, true_primary_timeline, stale, stale_timeline
+        ),
+        SplitBrainResolution::ReplicaFollowing { .. } => format!(
+            "SplitBrain: {} has quorum, demote {} (same TL)",
+            info.true_primary, stale
+        ),
+        SplitBrainResolution::Indeterminate => {
+            "SplitBrain: cannot determine true primary (insufficient evidence)".to_owned()
+        }
+    }
+}
+
 type ConnectionKey = (String, Option<String>);
 
 fn group_connections_by_identity(
@@ -689,4 +737,83 @@ fn group_connections_by_identity(
         grouped.entry(key).or_default().push(conn);
     }
     grouped
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::v2::analyze::{Confidence, SplitBrainFinding};
+
+    use super::*;
+
+    #[test]
+    fn lower_tl_short_string_names_action() {
+        let info = SplitBrainInfo {
+            true_primary: "db001".to_owned(),
+            stale_primaries: vec!["db002".to_owned()],
+            resolution: SplitBrainResolution::LowerTimelineHasQuorum {
+                true_primary_timeline: 11,
+                stale_timeline: 12,
+                replicas_following_true: vec!["db003".to_owned()],
+            },
+            confidence: Confidence::BestEffort,
+            findings: vec![SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                primary: "db002".to_owned(),
+                required: 1,
+                observed: 0,
+            }],
+        };
+
+        let (short, _) = split_brain_reason(&info);
+
+        assert!(short.contains("fence db002"), "short was: {short}");
+        assert!(short.contains("lower TL=11"), "short was: {short}");
+    }
+
+    #[test]
+    fn refuse_overrides_resolution_text() {
+        let info = SplitBrainInfo {
+            true_primary: "db001".to_owned(),
+            stale_primaries: vec!["db002".to_owned()],
+            resolution: SplitBrainResolution::HigherTimeline {
+                true_primary_timeline: 12,
+                stale_timeline: 11,
+            },
+            confidence: Confidence::Refuse,
+            findings: vec![SplitBrainFinding::SystemIdentifierMismatch {
+                nodes: vec!["db003".to_owned()],
+            }],
+        };
+
+        let (short, _) = split_brain_reason(&info);
+
+        assert!(short.starts_with("REFUSE/"), "short was: {short}");
+        assert!(
+            short.contains("system_identifier mismatch"),
+            "short was: {short}"
+        );
+        // The resolution text must NOT appear:
+        assert!(!short.contains("has quorum"), "short was: {short}");
+    }
+
+    #[test]
+    fn findings_appear_in_details_json() {
+        let info = SplitBrainInfo {
+            true_primary: "db001".to_owned(),
+            stale_primaries: vec!["db002".to_owned()],
+            resolution: SplitBrainResolution::Indeterminate,
+            confidence: Confidence::Conflicting,
+            findings: vec![SplitBrainFinding::ReplicaWalReceiverStale {
+                replica: "db003".to_owned(),
+                claimed_sender: "db002".to_owned(),
+            }],
+        };
+
+        let (_, details) = split_brain_reason(&info);
+
+        assert!(
+            details.contains("ReplicaWalReceiverStale"),
+            "details were: {details}"
+        );
+        assert!(details.contains("db003"), "details were: {details}");
+    }
 }
