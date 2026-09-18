@@ -1279,7 +1279,7 @@ mod cluster_state_tests {
             .with_primary(
                 PrimaryHealthBuilder::new()
                     .with_timeline(13)
-                    .with_followers(&["dev-pg-app001-db003.sto3.example.com"])
+                    .with_followers(&["dev_pg_app001_db003"])
                     .build(),
             )
             .build();

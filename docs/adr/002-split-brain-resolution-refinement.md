@@ -24,7 +24,7 @@ The true primary is the one whose **sync quorum is satisfied and that is activel
 
 - 1 primary + 2 replicas per cluster (replicas A and B). The resolver assumes this topology; >2 replicas is out of scope for v1.
 - `synchronous_standby_names = 'ANY 1 (A, B)'` — quorum is satisfiable by either replica alone
-- repmgr-set `application_name` equals the node name
+- `application_name` is **not** the node name — it's a separate namespace. Configuration management derives it from the node's FQDN: the first label, with hyphens replaced by underscores, e.g. `prod-pg-app001-db002.sto1.example.com` → `prod_pg_app001_db002`. Any comparison between `application_name` and `node_name` must apply this transform first; a literal `==` never matches.
 - `wal_sender_timeout = 5min` (300_000 ms). Keepalives are sent at `wal_sender_timeout / 2` ≈ 150 s.
 - Scanner role has `pg_read_server_files` (the tool is run by DBAs, so this privilege is in place)
 
@@ -70,7 +70,7 @@ Replace the current `sender_host == primary.ip` match in `build_replica_followin
   - `wal_receiver.last_msg_receipt_time` is within `freshness_threshold` of the scan-start timestamp (see below).
 
 - **Primary side (corroborating, only checked if replica side passes):**
-  - The primary's `pg_stat_replication` has a row whose `application_name` equals the replica's node name. `application_name == ""` is **rejected** as unmatchable (postgres default when client doesn't set one; matches indiscriminately otherwise).
+  - The primary's `pg_stat_replication` has a row whose `application_name` equals the replica's node name normalized to the fleet's `application_name` form (`node_name.split('.')[0].replace('-', '_')` — see cluster assumptions above; the two are different namespaces). `application_name == ""` is **rejected** as unmatchable (postgres default when client doesn't set one; matches indiscriminately otherwise).
   - The row's `state` ∈ {`"streaming"`, `"catchup"`}, and explicitly `state ≠ "backup"` (which is a `pg_basebackup` client, not a replication consumer).
   - The row's `reply_time` is within `freshness_threshold` of the scan-start timestamp.
 

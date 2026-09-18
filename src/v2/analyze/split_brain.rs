@@ -229,9 +229,11 @@ fn extract_timeline_info<'a>(primaries: &[&'a AnalyzedNode]) -> TimelineInfo<'a>
 ///   - Replica side (authoritative): `wal_receiver` names this primary, status is
 ///     `streaming`/`catchup` and `last_msg_receipt_time` is within the freshness
 ///     threshold.
-///   - Primary side (corroborating): `pg_stat_replication` has a row with a non-empty
-///     `application_name` matching the replica, stat is `streaming`/`catchup`, and
-///     `reply_time` is fresh
+///   - Primary side (corroborating): `pg_stat_replication` has a row whose non-empty
+///     `application_name` matches the replica's fleet application name (see
+///     `fleet_application_name` -- `application_name` and `node_name` are different
+///     namespaces and must be normalized before comparing), stat is `streaming`/`catchup`,
+///     and `reply_time` is fresh
 ///
 /// Outcomes:
 ///   - replica-side fails -> not following (silent).
@@ -302,9 +304,10 @@ fn build_replica_following_map(
             // primary-side gate (corroborating). Rejects:
             // - empty `application_name`; it's a pg default and matches indiscriminately
             // - `state=backup`: pg_basebackup clients, not replication consumers.
+            let replica_application_name = fleet_application_name(&replica.node_name);
             let primary_row = p_health.replication.iter().find(|conn| {
                 !conn.application_name.is_empty()
-                    && conn.application_name == replica.node_name
+                    && conn.application_name == replica_application_name
                     && matches!(
                         conn.state,
                         ReplicationState::Streaming | ReplicationState::Catchup
@@ -612,6 +615,16 @@ fn parse_wal_sender_timeout(cfg: &HashMap<String, String>) -> i64 {
         .unwrap_or(60_000) // pg default
 }
 
+/// `application_name` is the node's first FQDN label with hyphens replaced by
+/// underscores, while `node_name` is the FQDN. Normalize before comparing.
+fn fleet_application_name(node_name: &str) -> String {
+    node_name
+        .split('.')
+        .next()
+        .unwrap_or(node_name)
+        .replace('-', "_")
+}
+
 #[expect(
     clippy::cast_possible_truncation,
     reason = "we don't have MAXINT followers"
@@ -633,6 +646,10 @@ fn parse_wal_sender_timeout(cfg: &HashMap<String, String>) -> i64 {
 ///
 /// That is, how many SSN-listed standbys are _also_ currently live followers of this primary. If it's below `required`,
 /// the primary can't be acking sync writes.
+///
+/// `members` is in `synchronous_standby_names` form (fleet application name); `gated` is in
+/// `node_name` form. The intersection normalizes `gated` via `fleet_application_name` before
+/// comparing -- the two are different namespaces, so a raw `==` is always empty.
 fn emit_quorum_findings(
     primaries: &[&AnalyzedNode],
     replicas_following: &HashMap<NodeName, Vec<NodeName>>,
@@ -659,7 +676,7 @@ fn emit_quorum_findings(
             .unwrap_or_default();
         let observed = members
             .iter()
-            .filter(|m| gated.iter().any(|g| g == *m))
+            .filter(|m| gated.iter().any(|g| fleet_application_name(g) == **m))
             .count() as u32;
 
         if observed < count {
@@ -1561,6 +1578,60 @@ mod tests {
             f,
             SplitBrainFinding::PrimaryQuorumUnsatisfied { primary, .. }
                 if primary == "db002"
+        )));
+    }
+
+    #[test]
+    fn gate_matches_fleet_shaped_application_name() {
+        let db1 = NodeBuilder::new("prod-pg-app001-db001.sto1.example.com")
+            .with_id(1)
+            .with_ip(IP_DB1)
+            .with_primary(
+                PrimaryHealthBuilder::new()
+                    .with_timeline(11)
+                    .with_followers(&["prod_pg_app001_db003"])
+                    .build(),
+            )
+            .build();
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = replica_following(3, "prod-pg-app001-db003.sto3.example.com", IP_DB1, 11);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert_eq!(info.true_primary, "prod-pg-app001-db001.sto1.example.com");
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::BidirectionalFlushingConfirmed(link)
+                if link.primary == "prod-pg-app001-db001.sto1.example.com"
+                    && link.replica == "prod-pg-app001-db003.sto3.example.com"
+        )));
+    }
+
+    #[test]
+    fn quorum_satisfied_with_fleet_shaped_names() {
+        // `synchronous_standby_names` lists standbys in application-name form;
+        // `replicas_following` is keyed by `node_name` (FQDN). Regression for
+        // F2: the intersection must normalize `node_name` before comparing, or
+        // `observed` stays pinned at 0 on every fleet-shaped cluster.
+        let db1 = primary_with_health(
+            1,
+            "prod-pg-app001-db001.sto1.example.com",
+            IP_DB1,
+            PrimaryHealthBuilder::new()
+                .with_timeline(11)
+                .with_synchronous_standby_names("ANY 1 (prod_pg_app001_db003)")
+                .with_followers(&["prod_pg_app001_db003"])
+                .build(),
+        );
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = replica_following(3, "prod-pg-app001-db003.sto3.example.com", IP_DB1, 11);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert!(!info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::PrimaryQuorumUnsatisfied { primary, .. }
+                if primary == "prod-pg-app001-db001.sto1.example.com"
         )));
     }
 }
