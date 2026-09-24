@@ -1280,6 +1280,11 @@ mod cluster_state_tests {
                 PrimaryHealthBuilder::new()
                     .with_timeline(13)
                     .with_followers(&["dev_pg_app001_db003"])
+                    // db002's own list names the other two nodes; the builder
+                    // default is db001's.
+                    .with_synchronous_standby_names(
+                        "ANY 1 ( dev_pg_app001_db001, dev_pg_app001_db003 )",
+                    )
                     .build(),
             )
             .build();
@@ -1319,12 +1324,19 @@ mod cluster_state_tests {
                     ],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
-                    ReplicationLink::new(
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
                         "dev-pg-app001-db002.sto2.example.com",
                         "dev-pg-app001-db003.sto3.example.com",
-                    ),
-                )],
+                    )),
+                    // db001 has no live follower among its fleet-shaped standby
+                    // names (the builder default), so its quorum is unsatisfied.
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "dev-pg-app001-db001.sto1.example.com".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             })),
         );
     }

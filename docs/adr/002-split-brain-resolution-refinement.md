@@ -94,6 +94,7 @@ Before resolving, check:
 
 - **`pg_control_system().system_identifier` consistency** across ALL nodes (primaries and replicas). A replica with a foreign `system_identifier` indicates a reseed/restore from an unrelated cluster; this is escalation-worthy regardless of split-brain. Mismatch → `Confidence::Refuse` with `SystemIdentifierMismatch(nodes)`.
 - **`synchronous_commit` durability** on every candidate primary. The `ANY 1 (A, B)` no-divergence claim depends on the standby actually fsyncing before ack. Refuse if any primary has `synchronous_commit` ∈ {`local`, `off`, `remote_write`, empty}. `remote_write` is included because it does not wait for fsync on the standby. Valid values: `on`, `remote_apply`, `remote_flush`.
+- **`synchronous_standby_names` must actually define a quorum** on every candidate primary. The `synchronous_commit` check above only holds if a standby is named at all: with SSN empty or unparseable, `SyncStandbysDefined()` is false and `synchronous_commit` fast-exits without waiting on any standby, regardless of its setting — so an isolated primary with `synchronous_commit=on` and no SSN acks locally and immediately, and the quorum-sync safety argument this ADR rests on does not hold. Empty/unparseable SSN on a candidate primary → `Confidence::Refuse` with `SyncQuorumDisabled(primary)`. This is independent of the `synchronous_commit` check: a primary can pass that check and still fail this one.
 
 In addition to setting `Confidence::Refuse`, **replicas with a `system_identifier` not matching the cluster's reference sysid are excluded from §1 gate input** — their replication evidence is treated as not endorsing any candidate, and they do not contribute to `observed` in the `PrimaryQuorumUnsatisfied` derivation (§4). Exclusion happens **before** `build_replica_following_map`, so excluded replicas never appear as followers in the map.
 
@@ -134,6 +135,7 @@ v1 finding categories:
 
 - `SystemIdentifierMismatch { nodes }` — sanity gate
 - `SynchronousCommitWeakened { primary, value }` — sanity gate
+- `SyncQuorumDisabled { primary }` — sanity gate
 - `ReplicaWalReceiverStale { replica, claimed_sender }` — gate rejected stale replica-side evidence
 - `PrimaryDoesNotSeeReplica { primary, replica }` — one-sided claim rejected
 - `BidirectionalFlushingConfirmed { primary, replica }` — positive corroboration

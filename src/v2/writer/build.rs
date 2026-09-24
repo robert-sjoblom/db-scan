@@ -674,6 +674,10 @@ fn format_refuse(info: &SplitBrainInfo) -> String {
             SplitBrainFinding::SynchronousCommitWeakened { primary, value } => {
                 Some(format!("synchronous_commit={} on {}", value, primary))
             }
+            SplitBrainFinding::SyncQuorumDisabled { primary } => Some(format!(
+                "synchronous_standby_names empty/unparseable on {}",
+                primary
+            )),
             SplitBrainFinding::ReplicaWalReceiverStale { .. }
             | SplitBrainFinding::PrimaryDoesNotSeeReplica(_)
             | SplitBrainFinding::BidirectionalFlushingConfirmed(_)
@@ -793,6 +797,30 @@ mod tests {
         );
         // The resolution text must NOT appear:
         assert!(!short.contains("has quorum"), "short was: {short}");
+    }
+
+    #[test]
+    fn refuse_names_sync_quorum_disabled_gate() {
+        let info = SplitBrainInfo {
+            true_primary: "db001".to_owned(),
+            stale_primaries: vec!["db002".to_owned()],
+            resolution: SplitBrainResolution::HigherTimeline {
+                true_primary_timeline: 12,
+                stale_timeline: 11,
+            },
+            confidence: Confidence::Refuse,
+            findings: vec![SplitBrainFinding::SyncQuorumDisabled {
+                primary: "db002".to_owned(),
+            }],
+        };
+
+        let (short, _) = split_brain_reason(&info);
+
+        assert!(short.starts_with("REFUSE/"), "short was: {short}");
+        assert!(
+            short.contains("synchronous_standby_names empty/unparseable on db002"),
+            "short was: {short}"
+        );
     }
 
     #[test]

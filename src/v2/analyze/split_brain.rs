@@ -87,6 +87,9 @@ pub enum SplitBrainFinding {
         primary: NodeName,
         value: String,
     },
+    SyncQuorumDisabled {
+        primary: NodeName,
+    },
     ReplicaWalReceiverStale {
         replica: NodeName,
         claimed_sender: NodeName,
@@ -170,6 +173,23 @@ pub(super) fn resolve_split_brain(
             findings.push(SplitBrainFinding::SynchronousCommitWeakened {
                 primary: p.node_name.clone(),
                 value: v.to_owned(),
+            });
+        }
+
+        // An empty/unparseable `synchronous_standby_names` means
+        // `SyncStandbysDefined()` is false, so `synchronous_commit` fast-exits
+        // without waiting on any standby -- the primary acks locally and
+        // immediately regardless of its `synchronous_commit` setting. The
+        // quorum-sync safety argument (an isolated primary acked nothing)
+        // does not hold here, so this is Refuse-worthy independent of the
+        // `synchronous_commit` check above.
+        let synchronous_standby_names = h
+            .configuration
+            .get("synchronous_standby_names")
+            .map_or("", String::as_str);
+        if parse(synchronous_standby_names).is_none() {
+            findings.push(SplitBrainFinding::SyncQuorumDisabled {
+                primary: p.node_name.clone(),
             });
         }
     }
@@ -399,6 +419,7 @@ fn determine_confidence_level(finding: &SplitBrainFinding, true_primary: &str) -
     match finding {
         SplitBrainFinding::SystemIdentifierMismatch { .. }
         | SplitBrainFinding::SynchronousCommitWeakened { .. }
+        | SplitBrainFinding::SyncQuorumDisabled { .. }
         | SplitBrainFinding::DivergentReplicaWal { .. } => Confidence::Refuse,
         // A quorum-blocked primary cannot have ack'd writes. When it's a stale
         // primary, that's the proof behind the resolution -- benign. When it's
@@ -705,11 +726,26 @@ mod tests {
     use pretty_assertions::assert_eq;
     use rstest::rstest;
 
+    /// `ANY 1` over the two other nodes, self-excluded, the way every node's list is
+    /// rendered regardless of role.
+    fn fleet_ssn(self_name: &str) -> String {
+        let others: Vec<&str> = ["db001", "db002", "db003"]
+            .into_iter()
+            .filter(|n| *n != self_name)
+            .collect();
+        format!("ANY 1 ( {} )", others.join(", "))
+    }
+
     fn primary(id: u32, name: &str, ip: Ipv4Addr, timeline: i32) -> AnalyzedNode {
         NodeBuilder::new(name)
             .with_id(id)
             .with_ip(ip)
-            .with_primary(PrimaryHealthBuilder::new().with_timeline(timeline).build())
+            .with_primary(
+                PrimaryHealthBuilder::new()
+                    .with_timeline(timeline)
+                    .with_synchronous_standby_names(&fleet_ssn(name))
+                    .build(),
+            )
             .build()
     }
 
@@ -739,6 +775,7 @@ mod tests {
             .with_primary(
                 PrimaryHealthBuilder::new()
                     .with_timeline(timeline)
+                    .with_synchronous_standby_names(&fleet_ssn(name))
                     .with_followers(followers)
                     .build(),
             )
@@ -1020,8 +1057,23 @@ mod tests {
                     true_primary_timeline: 12,
                     stale_timeline: 11,
                 },
-                confidence: Confidence::BestEffort,
-                findings: vec![],
+                // Neither primary has a live follower, so both report quorum
+                // unsatisfied. The elected primary's finding is what makes this
+                // Conflicting rather than BestEffort (ADR-002 §3): we are keeping
+                // a primary that cannot currently ack.
+                confidence: Confidence::Conflicting,
+                findings: vec![
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db001".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db002".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             }
         );
     }
@@ -1047,9 +1099,17 @@ mod tests {
                     replicas_following_true: vec!["db003".to_owned()],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
-                    ReplicationLink::new("db002", "db003"),
-                )],
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
+                        "db002", "db003",
+                    )),
+                    // The stale primary has no live follower (ADR-002 §4).
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db001".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             }
         );
     }
@@ -1077,9 +1137,18 @@ mod tests {
                     replicas_following_true: vec!["db003".to_owned()],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
-                    ReplicationLink::new("db001", "db003"),
-                )],
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
+                        "db001", "db003",
+                    )),
+                    // The isolated higher-TL primary's unsatisfied quorum is the
+                    // proof behind the resolution (ADR-002 §4, matrix row C-b).
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db002".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             }
         );
     }
@@ -1103,9 +1172,16 @@ mod tests {
                     replicas_following_true: vec!["db003".to_owned()],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
-                    ReplicationLink::new("db002", "db003"),
-                )],
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
+                        "db002", "db003",
+                    )),
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db001".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             }
         );
     }
@@ -1150,8 +1226,21 @@ mod tests {
                 true_primary: "db001".to_owned(),
                 stale_primaries: vec!["db002".to_owned()],
                 resolution: SplitBrainResolution::Indeterminate,
-                confidence: Confidence::BestEffort,
-                findings: vec![],
+                // Both primaries are isolated, so both report quorum unsatisfied;
+                // the tiebreak-picked true primary's finding makes it Conflicting.
+                confidence: Confidence::Conflicting,
+                findings: vec![
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db001".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db002".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             },
         );
     }
@@ -1463,6 +1552,56 @@ mod tests {
             f,
             SplitBrainFinding::SynchronousCommitWeakened { primary, value }
             if primary == "db001" && value == "remote_write"
+        )));
+    }
+
+    #[test]
+    fn empty_synchronous_standby_names_refuses() {
+        // Empty SSN means SyncStandbysDefined() is false, so
+        // synchronous_commit fast-exits without waiting on any standby --
+        // the primary acks locally and immediately regardless of its
+        // synchronous_commit setting. The quorum-sync safety argument does
+        // not hold, independent of the synchronous_commit check.
+        let db1 = primary_with_health(
+            1,
+            "db001",
+            IP_DB1,
+            PrimaryHealthBuilder::new()
+                .with_synchronous_standby_names("")
+                .build(),
+        );
+        let db2 = primary(2, "db002", IP_DB2, 12);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[]);
+
+        assert_eq!(info.confidence, Confidence::Refuse);
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::SyncQuorumDisabled { primary } if primary == "db001"
+        )));
+    }
+
+    #[test]
+    fn unparseable_synchronous_standby_names_refuses() {
+        let db1 = primary_with_health(
+            1,
+            "db001",
+            IP_DB1,
+            PrimaryHealthBuilder::new()
+                // Missing '(' after the count -- the legacy (no-prefix) form
+                // parses any comma-separated list, so this must keep the
+                // "ANY "/"FIRST " prefix to actually fail parsing.
+                .with_synchronous_standby_names("ANY 1 db002")
+                .build(),
+        );
+        let db2 = primary(2, "db002", IP_DB2, 12);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[]);
+
+        assert_eq!(info.confidence, Confidence::Refuse);
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::SyncQuorumDisabled { primary } if primary == "db001"
         )));
     }
 
