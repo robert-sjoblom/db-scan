@@ -31,6 +31,8 @@ type NodeName = String;
 
 pub type SplitBrainInfo = crate::v2::analyze::split_brain::SplitBrainInfo;
 pub type SplitBrainResolution = crate::v2::analyze::split_brain::SplitBrainResolution;
+pub type SplitBrainFinding = crate::v2::analyze::split_brain::SplitBrainFinding;
+pub type Confidence = crate::v2::analyze::split_brain::Confidence;
 
 mod checks;
 mod classify;
@@ -125,7 +127,7 @@ pub enum Reason {
     /// Cluster has unexpected topology (e.g., more than 3 nodes).
     UnexpectedTopology,
 
-    // Degraded reasons (least → most severe within the tier).
+    // Degraded reasons (least -> most severe within the tier).
     /// I/O or block-device errors found in dmesg.
     DiskIoErrors,
     /// One or more streaming replicas have a `sync_state` other than `quorum`.
@@ -143,7 +145,7 @@ pub enum Reason {
     /// outranks lower Degraded findings so it surfaces as the headline reason.
     ReducedRedundancy,
 
-    // Critical reasons (least → most severe within the tier).
+    // Critical reasons (least -> most severe within the tier).
     /// Quorum sync is not activated.
     SyncCommitOff,
     /// Archiving is not enabled.
@@ -247,7 +249,7 @@ pub enum NodeVerdict {
     NotInQuorum,
     SyncCommitOff,
     /// Node is reachable in inventory but unreachable for health checks
-    /// `(Role::Unknown)`. One or more of these → cluster has reduced redundancy.
+    /// `(Role::Unknown)`. One or more of these -> cluster has reduced redundancy.
     Unreachable,
 }
 
@@ -920,7 +922,7 @@ mod cluster_state_tests {
         //
         // Two Critical conditions coexist: ArchiveFailure (durability broken)
         // and WritesBlocked (writers hang waiting for an ack that won't come).
-        // Customer-visible write hang outranks archive failure → headline
+        // Customer-visible write hang outranks archive failure -> headline
         // Reason should be WritesBlocked. The ArchiveFailure node verdict
         // must still be present so the operator sees both findings.
         let mut config = HashMap::new();
@@ -1153,7 +1155,7 @@ mod cluster_state_tests {
         // both replicas streaming with sync_state=async. Empty standby_names
         // means postgres can't actually sync — sync replication is effectively
         // disabled at the primary regardless of sync_commit value. This is a
-        // misconfiguration that puts writes at risk → Critical SyncCommitOff.
+        // misconfiguration that puts writes at risk -> Critical SyncCommitOff.
         let mut config = HashMap::new();
         config.insert("synchronous_commit".to_owned(), "on".to_owned());
         config.insert("synchronous_standby_names".to_owned(), String::new());
@@ -1205,7 +1207,7 @@ mod cluster_state_tests {
     #[test]
     fn test_degraded_when_one_replica_is_potential() {
         // Only one of the two replicas is in Quorum; the other is Potential.
-        // Strict policy: any non-quorum replica → Degraded.
+        // Strict policy: any non-quorum replica -> Degraded.
         // The builder applies sync_state uniformly to all replicas, so we
         // override one entry post-build to get a heterogeneous shape.
         let mut primary_health = PrimaryHealthBuilder::new()
@@ -1277,7 +1279,12 @@ mod cluster_state_tests {
             .with_primary(
                 PrimaryHealthBuilder::new()
                     .with_timeline(13)
-                    .with_followers(&["dev-pg-app001-db003.sto3.example.com"])
+                    .with_followers(&["dev_pg_app001_db003"])
+                    // db002's own list names the other two nodes; the builder
+                    // default is db001's.
+                    .with_synchronous_standby_names(
+                        "ANY 1 ( dev_pg_app001_db001, dev_pg_app001_db003 )",
+                    )
                     .build(),
             )
             .build();
@@ -1317,13 +1324,150 @@ mod cluster_state_tests {
                     ],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
-                    ReplicationLink::new(
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
                         "dev-pg-app001-db002.sto2.example.com",
                         "dev-pg-app001-db003.sto3.example.com",
-                    ),
-                )],
+                    )),
+                    // db001 has no live follower among its fleet-shaped standby
+                    // names (the builder default), so its quorum is unsatisfied.
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "dev-pg-app001-db001.sto1.example.com".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             })),
+        );
+    }
+
+    #[test]
+    fn c_b_capture_resolves_lower_timeline_has_quorum() {
+        use crate::v2::analyze::split_brain::{
+            ReplicationLink, SplitBrainFinding, SplitBrainInfo, SplitBrainResolution,
+        };
+        use crate::v2::tests_common::split_brain::c_b_lower_timeline_has_quorum;
+
+        let actual = analyze(c_b_lower_timeline_has_quorum());
+
+        assert_eq!(
+            actual.verdict.cluster_verdict(),
+            Some(&ClusterVerdict::SplitBrain(SplitBrainInfo {
+                true_primary: "dev-pg-app002-db001.sto1.example.com".to_owned(),
+                stale_primaries: vec!["dev-pg-app002-db002.sto2.example.com".to_owned()],
+                resolution: SplitBrainResolution::LowerTimelineHasQuorum {
+                    true_primary_timeline: 10,
+                    stale_timeline: 11,
+                    replicas_following_true: vec![
+                        "dev-pg-app002-db003.sto3.example.com".to_owned(),
+                    ],
+                },
+                confidence: Confidence::BestEffort,
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
+                        "dev-pg-app002-db001.sto1.example.com",
+                        "dev-pg-app002-db003.sto3.example.com",
+                    )),
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "dev-pg-app002-db002.sto2.example.com".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
+            })),
+        );
+    }
+
+    #[test]
+    fn c_b_capture_renders_keep_lower_timeline_fence_higher() {
+        use crate::v2::tests_common::split_brain::c_b_lower_timeline_has_quorum;
+
+        let health = classify::classify(analyze(c_b_lower_timeline_has_quorum()));
+        let table = crate::v2::writer::render_for_tests(&health);
+
+        assert!(
+            table.contains("CRITICAL dev-pg-app002"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains("db001@sto1\u{b9}\u{2070} vs db002@sto2\u{b9}\u{b9}"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains("db003@sto3->db001@sto1"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains(
+                "SplitBrain: keep db001@sto1 (lower TL=10, has quorum), \
+                 fence db002@sto2 (TL=11, quorum unsatisfied)"
+            ),
+            "table was:\n{table}"
+        );
+    }
+
+    #[test]
+    fn c_a_capture_resolves_both() {
+        use crate::v2::analyze::split_brain::{
+            ReplicationLink, SplitBrainFinding, SplitBrainInfo, SplitBrainResolution,
+        };
+        use crate::v2::tests_common::split_brain::c_a_both;
+
+        let actual = analyze(c_a_both());
+
+        assert_eq!(
+            actual.verdict.cluster_verdict(),
+            Some(&ClusterVerdict::SplitBrain(SplitBrainInfo {
+                true_primary: "dev-pg-app003-db002.sto3.example.com".to_owned(),
+                stale_primaries: vec!["dev-pg-app003-db001.sto2.example.com".to_owned()],
+                resolution: SplitBrainResolution::Both {
+                    true_primary_timeline: 11,
+                    stale_timeline: 10,
+                    replicas_following_true: vec![
+                        "dev-pg-app003-db003.sto1.example.com".to_owned(),
+                    ],
+                },
+                confidence: Confidence::BestEffort,
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
+                        "dev-pg-app003-db002.sto3.example.com",
+                        "dev-pg-app003-db003.sto1.example.com",
+                    )),
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "dev-pg-app003-db001.sto2.example.com".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
+            })),
+        );
+    }
+
+    #[test]
+    fn c_a_capture_renders_demote_zombie() {
+        use crate::v2::tests_common::split_brain::c_a_both;
+
+        let health = classify::classify(analyze(c_a_both()));
+        let table = crate::v2::writer::render_for_tests(&health);
+
+        assert!(
+            table.contains("CRITICAL dev-pg-app003"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains("db002@sto3\u{b9}\u{b9} vs db001@sto2\u{b9}\u{2070}"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains("db003@sto1->db002@sto3"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains(
+                "SplitBrain: keep db002@sto3 (TL=11, has quorum), \
+                 demote db001@sto2 (TL=10, quorum unsatisfied)"
+            ),
+            "table was:\n{table}"
         );
     }
 
@@ -1449,7 +1593,7 @@ mod cluster_state_tests {
 
     #[test]
     fn disk_degraded_cluster_with_filesystem_errors_upgrades_to_critical() {
-        // Cluster is already Degraded (one replica down) + filesystem errors → Critical
+        // Cluster is already Degraded (one replica down) + filesystem errors -> Critical
         let cluster = make_cluster(vec![
             make_node_with_disk(
                 1,
@@ -1498,7 +1642,7 @@ mod cluster_state_tests {
 
     #[test]
     fn disk_degraded_cluster_with_only_io_errors_stays_degraded_with_pg_reason() {
-        // Cluster is already Degraded (one replica down) + only io errors → still Degraded (pg reason)
+        // Cluster is already Degraded (one replica down) + only io errors -> still Degraded (pg reason)
         let cluster = make_cluster(vec![
             make_node_with_disk(
                 1,
@@ -1539,7 +1683,7 @@ mod cluster_state_tests {
 
     #[test]
     fn disk_critical_cluster_pg_reason_is_preserved() {
-        // Cluster is already Critical (no primary) → filesystem errors don't change the reason
+        // Cluster is already Critical (no primary) -> filesystem errors don't change the reason
         let cluster = make_cluster(vec![
             make_node_with_disk(
                 1,

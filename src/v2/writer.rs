@@ -84,6 +84,16 @@ fn should_display(health: &ClusterHealth, options: &WriterOptions) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) fn render_for_tests(health: &ClusterHealth) -> String {
+    let view = build::build_cluster_view(health);
+    let options = WriterOptions {
+        no_color: true,
+        ..WriterOptions::default()
+    };
+    terminal::render_table(&[view], &options)
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         units::{display_width, to_superscript},

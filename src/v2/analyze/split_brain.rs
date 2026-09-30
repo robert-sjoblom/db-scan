@@ -30,8 +30,8 @@ pub enum SplitBrainResolution {
         stale_timeline: i32,
         replicas_following_true: Vec<NodeName>,
     },
-    /// Replica evidence overrides timeline - replicas are following a lower-timeline primary
-    /// This indicates the higher-timeline primary was likely isolated after promotion.
+    /// A live replica is flushing for the lower-timeline primary, which therefore has
+    /// quorum; the higher-timeline primary was isolated after its promotion.
     LowerTimelineHasQuorum {
         true_primary_timeline: i32,
         stale_timeline: i32,
@@ -86,6 +86,9 @@ pub enum SplitBrainFinding {
     SynchronousCommitWeakened {
         primary: NodeName,
         value: String,
+    },
+    SyncQuorumDisabled {
+        primary: NodeName,
     },
     ReplicaWalReceiverStale {
         replica: NodeName,
@@ -172,6 +175,23 @@ pub(super) fn resolve_split_brain(
                 value: v.to_owned(),
             });
         }
+
+        // An empty/unparseable `synchronous_standby_names` means
+        // `SyncStandbysDefined()` is false, so `synchronous_commit` fast-exits
+        // without waiting on any standby -- the primary acks locally and
+        // immediately regardless of its `synchronous_commit` setting. The
+        // quorum-sync safety argument (an isolated primary acked nothing)
+        // does not hold here, so this is Refuse-worthy independent of the
+        // `synchronous_commit` check above.
+        let synchronous_standby_names = h
+            .configuration
+            .get("synchronous_standby_names")
+            .map_or("", String::as_str);
+        if parse(synchronous_standby_names).is_none() {
+            findings.push(SplitBrainFinding::SyncQuorumDisabled {
+                primary: p.node_name.clone(),
+            });
+        }
     }
 
     let (replicas_following, following_findings) =
@@ -193,8 +213,12 @@ fn extract_timeline_info<'a>(primaries: &[&'a AnalyzedNode]) -> TimelineInfo<'a>
         .filter_map(|p| get_timeline(p).map(|tl| (*p, tl)))
         .collect();
 
-    // Sort by timeline descending (highest first)
-    primary_timelines.sort_by_key(|b| std::cmp::Reverse(b.1));
+    // Highest timeline first; ties by node name so the equal-timeline pick is stable
+    // across runs (ADR-002, Consequences).
+    primary_timelines.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.node_name.cmp(&b.0.node_name))
+    });
 
     let highest_timeline = primary_timelines[0].1;
     let highest_timeline_node = primary_timelines[0].0;
@@ -229,9 +253,11 @@ fn extract_timeline_info<'a>(primaries: &[&'a AnalyzedNode]) -> TimelineInfo<'a>
 ///   - Replica side (authoritative): `wal_receiver` names this primary, status is
 ///     `streaming`/`catchup` and `last_msg_receipt_time` is within the freshness
 ///     threshold.
-///   - Primary side (corroborating): `pg_stat_replication` has a row with a non-empty
-///     `application_name` matching the replica, stat is `streaming`/`catchup`, and
-///     `reply_time` is fresh
+///   - Primary side (corroborating): `pg_stat_replication` has a row whose non-empty
+///     `application_name` matches the replica's fleet application name (see
+///     `fleet_application_name` -- `application_name` and `node_name` are different
+///     namespaces and must be normalized before comparing), stat is `streaming`/`catchup`,
+///     and `reply_time` is fresh
 ///
 /// Outcomes:
 ///   - replica-side fails -> not following (silent).
@@ -239,9 +265,9 @@ fn extract_timeline_info<'a>(primaries: &[&'a AnalyzedNode]) -> TimelineInfo<'a>
 ///   - Both pass -> following + `BidirectionalFlushingConfirmed` (plus `ReplicaInCatchup`
 ///     if the primary-side state is `catchup`
 ///
-/// Freshness uses each node's own `current_time` against that same node's recorded
-/// timestamps, so the comparison is intra-node and immune to scanner<->db clock skew
-/// that would otherwise eat into a tight threshold.
+/// Freshness compares each node's own `current_time` with timestamps read from that
+/// same node, so the scanner's clock plays no part. `reply_time` is stamped by the
+/// standby's clock, so the primary-side half is exposed to skew between the two nodes.
 fn build_replica_following_map(
     timeline_info: &TimelineInfo<'_>,
     replicas: &[&AnalyzedNode],
@@ -262,7 +288,9 @@ fn build_replica_following_map(
         let Some(p_health) = primary.role.as_primary() else {
             continue;
         };
-        // `wal_sender_timeout` can differ between primaries
+        // Uses the primary's `wal_sender_timeout`; the replica row's lifetime actually
+        // follows the standby's `wal_receiver_timeout`, which is not collected yet. Both
+        // are 5min fleet-wide, so the threshold holds (ADR-002 §1).
         let threshold_ms = (parse_wal_sender_timeout(&p_health.configuration) / 2) + 30_000;
 
         for replica in replicas {
@@ -302,9 +330,10 @@ fn build_replica_following_map(
             // primary-side gate (corroborating). Rejects:
             // - empty `application_name`; it's a pg default and matches indiscriminately
             // - `state=backup`: pg_basebackup clients, not replication consumers.
+            let replica_application_name = fleet_application_name(&replica.node_name);
             let primary_row = p_health.replication.iter().find(|conn| {
                 !conn.application_name.is_empty()
-                    && conn.application_name == replica.node_name
+                    && conn.application_name == replica_application_name
                     && matches!(
                         conn.state,
                         ReplicationState::Streaming | ReplicationState::Catchup
@@ -396,6 +425,7 @@ fn determine_confidence_level(finding: &SplitBrainFinding, true_primary: &str) -
     match finding {
         SplitBrainFinding::SystemIdentifierMismatch { .. }
         | SplitBrainFinding::SynchronousCommitWeakened { .. }
+        | SplitBrainFinding::SyncQuorumDisabled { .. }
         | SplitBrainFinding::DivergentReplicaWal { .. } => Confidence::Refuse,
         // A quorum-blocked primary cannot have ack'd writes. When it's a stale
         // primary, that's the proof behind the resolution -- benign. When it's
@@ -612,6 +642,16 @@ fn parse_wal_sender_timeout(cfg: &HashMap<String, String>) -> i64 {
         .unwrap_or(60_000) // pg default
 }
 
+/// `application_name` is the node's first FQDN label with hyphens replaced by
+/// underscores, while `node_name` is the FQDN. Normalize before comparing.
+fn fleet_application_name(node_name: &str) -> String {
+    node_name
+        .split('.')
+        .next()
+        .unwrap_or(node_name)
+        .replace('-', "_")
+}
+
 #[expect(
     clippy::cast_possible_truncation,
     reason = "we don't have MAXINT followers"
@@ -633,6 +673,10 @@ fn parse_wal_sender_timeout(cfg: &HashMap<String, String>) -> i64 {
 ///
 /// That is, how many SSN-listed standbys are _also_ currently live followers of this primary. If it's below `required`,
 /// the primary can't be acking sync writes.
+///
+/// `members` is in `synchronous_standby_names` form (fleet application name); `gated` is in
+/// `node_name` form. The intersection normalizes `gated` via `fleet_application_name` before
+/// comparing -- the two are different namespaces, so a raw `==` is always empty.
 fn emit_quorum_findings(
     primaries: &[&AnalyzedNode],
     replicas_following: &HashMap<NodeName, Vec<NodeName>>,
@@ -659,7 +703,7 @@ fn emit_quorum_findings(
             .unwrap_or_default();
         let observed = members
             .iter()
-            .filter(|m| gated.iter().any(|g| g == *m))
+            .filter(|m| gated.iter().any(|g| fleet_application_name(g) == **m))
             .count() as u32;
 
         if observed < count {
@@ -688,11 +732,26 @@ mod tests {
     use pretty_assertions::assert_eq;
     use rstest::rstest;
 
+    /// `ANY 1` over the two other nodes, self-excluded, the way every node's list is
+    /// rendered regardless of role.
+    fn fleet_ssn(self_name: &str) -> String {
+        let others: Vec<&str> = ["db001", "db002", "db003"]
+            .into_iter()
+            .filter(|n| *n != self_name)
+            .collect();
+        format!("ANY 1 ( {} )", others.join(", "))
+    }
+
     fn primary(id: u32, name: &str, ip: Ipv4Addr, timeline: i32) -> AnalyzedNode {
         NodeBuilder::new(name)
             .with_id(id)
             .with_ip(ip)
-            .with_primary(PrimaryHealthBuilder::new().with_timeline(timeline).build())
+            .with_primary(
+                PrimaryHealthBuilder::new()
+                    .with_timeline(timeline)
+                    .with_synchronous_standby_names(&fleet_ssn(name))
+                    .build(),
+            )
             .build()
     }
 
@@ -722,6 +781,7 @@ mod tests {
             .with_primary(
                 PrimaryHealthBuilder::new()
                     .with_timeline(timeline)
+                    .with_synchronous_standby_names(&fleet_ssn(name))
                     .with_followers(followers)
                     .build(),
             )
@@ -951,7 +1011,7 @@ mod tests {
 
     #[test]
     fn primaries_disagree_on_sysid_excludes_all_replicas() {
-        // Two primaries hold different sysids → no reference exists → all nodes
+        // Two primaries hold different sysids -> no reference exists -> all nodes
         // flagged; replica is filtered out and resolution falls back to timeline-only.
         let db1 = NodeBuilder::new("db001")
             .with_id(1)
@@ -1003,8 +1063,23 @@ mod tests {
                     true_primary_timeline: 12,
                     stale_timeline: 11,
                 },
-                confidence: Confidence::BestEffort,
-                findings: vec![],
+                // Neither primary has a live follower, so both report quorum
+                // unsatisfied. The elected primary's finding is what makes this
+                // Conflicting rather than BestEffort (ADR-002 §3): we are keeping
+                // a primary that cannot currently ack.
+                confidence: Confidence::Conflicting,
+                findings: vec![
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db001".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db002".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             }
         );
     }
@@ -1030,9 +1105,17 @@ mod tests {
                     replicas_following_true: vec!["db003".to_owned()],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
-                    ReplicationLink::new("db002", "db003"),
-                )],
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
+                        "db002", "db003",
+                    )),
+                    // The stale primary has no live follower (ADR-002 §4).
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db001".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             }
         );
     }
@@ -1060,9 +1143,18 @@ mod tests {
                     replicas_following_true: vec!["db003".to_owned()],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
-                    ReplicationLink::new("db001", "db003"),
-                )],
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
+                        "db001", "db003",
+                    )),
+                    // The isolated higher-TL primary's unsatisfied quorum is the
+                    // proof behind the resolution (ADR-002 §4, matrix row C-b).
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db002".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             }
         );
     }
@@ -1086,9 +1178,16 @@ mod tests {
                     replicas_following_true: vec!["db003".to_owned()],
                 },
                 confidence: Confidence::BestEffort,
-                findings: vec![SplitBrainFinding::BidirectionalFlushingConfirmed(
-                    ReplicationLink::new("db002", "db003"),
-                )],
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
+                        "db002", "db003",
+                    )),
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db001".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             }
         );
     }
@@ -1119,6 +1218,20 @@ mod tests {
     }
 
     #[test]
+    fn equal_timelines_pick_is_stable_across_input_order() {
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary(2, "db002", IP_DB2, 11);
+        let replicas: Vec<&AnalyzedNode> = vec![];
+
+        let forward = resolve_split_brain(&[&db1, &db2], &replicas);
+        let reversed = resolve_split_brain(&[&db2, &db1], &replicas);
+
+        assert_eq!(forward.true_primary, "db001");
+        assert_eq!(reversed.true_primary, "db001");
+        assert_eq!(reversed.stale_primaries, vec!["db002".to_owned()]);
+    }
+
+    #[test]
     fn equal_timelines_no_replica_evidence_is_indeterminate() {
         let db1 = primary(1, "db001", IP_DB1, 11);
         let db2 = primary(2, "db002", IP_DB2, 11);
@@ -1133,8 +1246,21 @@ mod tests {
                 true_primary: "db001".to_owned(),
                 stale_primaries: vec!["db002".to_owned()],
                 resolution: SplitBrainResolution::Indeterminate,
-                confidence: Confidence::BestEffort,
-                findings: vec![],
+                // Both primaries are isolated, so both report quorum unsatisfied;
+                // the tiebreak-picked true primary's finding makes it Conflicting.
+                confidence: Confidence::Conflicting,
+                findings: vec![
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db001".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "db002".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
             },
         );
     }
@@ -1344,7 +1470,7 @@ mod tests {
     #[test]
     fn gate_rejects_empty_application_name() {
         // Primary's pg_stat_replication has a row with empty application_name.
-        // Replica-side gate passes, but no row matches "db003" → PrimaryDoesNotSeeReplica.
+        // Replica-side gate passes, but no row matches "db003" -> PrimaryDoesNotSeeReplica.
         let db1 = primary_with_followers(1, "db001", IP_DB1, 11, &[""]);
         let db2 = primary(2, "db002", IP_DB2, 12);
         let db3 = replica_following(3, "db003", IP_DB1, 11);
@@ -1446,6 +1572,56 @@ mod tests {
             f,
             SplitBrainFinding::SynchronousCommitWeakened { primary, value }
             if primary == "db001" && value == "remote_write"
+        )));
+    }
+
+    #[test]
+    fn empty_synchronous_standby_names_refuses() {
+        // Empty SSN means SyncStandbysDefined() is false, so
+        // synchronous_commit fast-exits without waiting on any standby --
+        // the primary acks locally and immediately regardless of its
+        // synchronous_commit setting. The quorum-sync safety argument does
+        // not hold, independent of the synchronous_commit check.
+        let db1 = primary_with_health(
+            1,
+            "db001",
+            IP_DB1,
+            PrimaryHealthBuilder::new()
+                .with_synchronous_standby_names("")
+                .build(),
+        );
+        let db2 = primary(2, "db002", IP_DB2, 12);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[]);
+
+        assert_eq!(info.confidence, Confidence::Refuse);
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::SyncQuorumDisabled { primary } if primary == "db001"
+        )));
+    }
+
+    #[test]
+    fn unparseable_synchronous_standby_names_refuses() {
+        let db1 = primary_with_health(
+            1,
+            "db001",
+            IP_DB1,
+            PrimaryHealthBuilder::new()
+                // Missing '(' after the count -- the legacy (no-prefix) form
+                // parses any comma-separated list, so this must keep the
+                // "ANY "/"FIRST " prefix to actually fail parsing.
+                .with_synchronous_standby_names("ANY 1 db002")
+                .build(),
+        );
+        let db2 = primary(2, "db002", IP_DB2, 12);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[]);
+
+        assert_eq!(info.confidence, Confidence::Refuse);
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::SyncQuorumDisabled { primary } if primary == "db001"
         )));
     }
 
@@ -1561,6 +1737,60 @@ mod tests {
             f,
             SplitBrainFinding::PrimaryQuorumUnsatisfied { primary, .. }
                 if primary == "db002"
+        )));
+    }
+
+    #[test]
+    fn gate_matches_fleet_shaped_application_name() {
+        let db1 = NodeBuilder::new("prod-pg-app001-db001.sto1.example.com")
+            .with_id(1)
+            .with_ip(IP_DB1)
+            .with_primary(
+                PrimaryHealthBuilder::new()
+                    .with_timeline(11)
+                    .with_followers(&["prod_pg_app001_db003"])
+                    .build(),
+            )
+            .build();
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = replica_following(3, "prod-pg-app001-db003.sto3.example.com", IP_DB1, 11);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert_eq!(info.true_primary, "prod-pg-app001-db001.sto1.example.com");
+        assert!(info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::BidirectionalFlushingConfirmed(link)
+                if link.primary == "prod-pg-app001-db001.sto1.example.com"
+                    && link.replica == "prod-pg-app001-db003.sto3.example.com"
+        )));
+    }
+
+    #[test]
+    fn quorum_satisfied_with_fleet_shaped_names() {
+        // `synchronous_standby_names` lists standbys in application-name form;
+        // `replicas_following` is keyed by `node_name` (FQDN). Regression for
+        // F2: the intersection must normalize `node_name` before comparing, or
+        // `observed` stays pinned at 0 on every fleet-shaped cluster.
+        let db1 = primary_with_health(
+            1,
+            "prod-pg-app001-db001.sto1.example.com",
+            IP_DB1,
+            PrimaryHealthBuilder::new()
+                .with_timeline(11)
+                .with_synchronous_standby_names("ANY 1 (prod_pg_app001_db003)")
+                .with_followers(&["prod_pg_app001_db003"])
+                .build(),
+        );
+        let db2 = primary(2, "db002", IP_DB2, 12);
+        let db3 = replica_following(3, "prod-pg-app001-db003.sto3.example.com", IP_DB1, 11);
+
+        let info = resolve_split_brain(&[&db1, &db2], &[&db3]);
+
+        assert!(!info.findings.iter().any(|f| matches!(
+            f,
+            SplitBrainFinding::PrimaryQuorumUnsatisfied { primary, .. }
+                if primary == "prod-pg-app001-db001.sto1.example.com"
         )));
     }
 }

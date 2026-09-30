@@ -228,14 +228,14 @@ Output           454 ms
 Total           1.78 s
 STATUS   CLUSTER        PRIMARY                    REPLICAS              LAG DISK REASON
 HEALTHY  dev-pg-app001  db001@sto1                 db002,db003           -   -    -
-CRITICAL prod-pg-app123 db001@sto1⁷ vs db002@sto2⁸ db003@sto3→db001@sto1 -   -    SplitBrain: replica overrides timeline (7 < 8)
+CRITICAL prod-pg-app123 db001@sto1⁷ vs db002@sto2⁸ db003@sto3->db001@sto1 -   -    SplitBrain: keep db001@sto1 (lower TL=7, has quorum), fence db002@sto2 (TL=8, quorum unsatisfied)
 
 ⁷ = timeline id
 ```
 
 Notes on the format:
 - `PRIMARY` and replica cells include the node's zone (`@sto1`).
-- A chained replica shows its upstream: `db003@sto3→db001@sto1`.
+- A chained replica shows its upstream: `db003@sto3->db001@sto1`.
 - When split-brain is detected, the primary cell lists candidates side-by-side with superscript timeline markers; footnote keys appear below the table.
 - `LAG` shows `-` when not applicable (no replica or no measurement), otherwise a byte count (e.g. `80MB`).
 - `DISK` is only populated when `--check-disks` is enabled.
@@ -278,7 +278,7 @@ Notes on the format:
 ### Data Flow
 
 ```
-Nodes API → Scanner → Analyzed Nodes → Cluster Builder → Clusters → Analyzer → Health Status → Writer → Output
+Nodes API -> Scanner -> Analyzed Nodes -> Cluster Builder -> Clusters -> Analyzer -> Health Status -> Writer -> Output
 ```
 
 ## Split-Brain Resolution
@@ -355,7 +355,7 @@ src/
 ├── config.rs                  # CLI + config file merge
 ├── database_portal.rs         # Node API client
 ├── logging.rs                 # Tracing setup
-├── pipeline.rs                # Scan → analyze → write orchestration
+├── pipeline.rs                # Scan -> analyze -> write orchestration
 ├── timings.rs                 # Stage timing instrumentation
 └── v2/
     ├── node.rs                # Node data structure

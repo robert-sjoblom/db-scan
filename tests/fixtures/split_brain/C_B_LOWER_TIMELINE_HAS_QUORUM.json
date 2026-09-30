@@ -1,0 +1,157 @@
+{
+    "id": 34,
+    "name": "dev-pg-app002",
+    "env": "dev",
+    "nodes": [
+        {
+            "id": 94,
+            "cluster_id": 34,
+            "node_name": "dev-pg-app002-db001.sto1.example.com",
+            "pg_version": "17.10",
+            "ip_address": "127.1.22.106",
+            "role": {
+                "primary": {
+                    "health": {
+                        "timeline_id": 10,
+                        "system_identifier": "7305215457781660034",
+                        "current_time": "2026-09-30T12:46:57.184923Z",
+                        "timeline_history": "1\t14A/20000A0\tno recovery target specified\n\n2\t14C/E20000A0\tno recovery target specified\n\n3\t14D/AD0000A0\tno recovery target specified\n\n4\t15D/1A0000A0\tno recovery target specified\n\n5\t1A4/E30000A0\tno recovery target specified\n\n6\t1A5/80000A0\tno recovery target specified\n\n7\t31C/CE0000A0\tno recovery target specified\n\n8\t73B/AF0000A0\tno recovery target specified\n\n9\t747/A1509BE0\tno recovery target specified\n",
+                        "uptime": "5 days 05:14:19.69602",
+                        "current_wal_lsn": "748/33F47A30",
+                        "configuration": {
+                            "wal_level": "logical",
+                            "archive_mode": "on",
+                            "archive_command": "/usr/bin/pgbackrest --stanza=dev-pg-app002 archive-push %p",
+                            "max_wal_senders": "35",
+                            "synchronous_commit": "remote_apply",
+                            "wal_sender_timeout": "300000",
+                            "max_replication_slots": "30",
+                            "synchronous_standby_names": "ANY 1 ( dev_pg_app002_db002, dev_pg_app002_db003 )"
+                        },
+                        "replication": [
+                            {
+                                "pid": 3109669,
+                                "usesysid": 16386,
+                                "usename": "replicator",
+                                "application_name": "dev_pg_app002_db003",
+                                "client_addr": "127.3.22.106",
+                                "client_hostname": null,
+                                "client_port": 50106,
+                                "backend_start": "2026-09-30T06:36:34.492323Z",
+                                "backend_xmin": "568153805",
+                                "state": "streaming",
+                                "sent_lsn": "748/33F47A30",
+                                "write_lsn": "748/33F47A30",
+                                "flush_lsn": "748/33F47A30",
+                                "replay_lsn": "748/33F47A30",
+                                "write_lag": "00:00:00.002027",
+                                "flush_lag": "00:00:00.003032",
+                                "replay_lag": "00:00:00.003084",
+                                "sync_priority": 1,
+                                "sync_state": "quorum",
+                                "reply_time": "2026-09-30T12:46:56.986174Z"
+                            }
+                        ],
+                        "archiver": {
+                            "archived_count": 384801,
+                            "failed_count": 0,
+                            "last_archived_wal": "0000000A0000074800000032",
+                            "last_archived_time": "2026-09-30T12:41:59.897926Z",
+                            "last_failed_wal": null,
+                            "last_failed_time": null
+                        },
+                        "replication_slots": []
+                    }
+                }
+            },
+            "errors": []
+        },
+        {
+            "id": 95,
+            "cluster_id": 34,
+            "node_name": "dev-pg-app002-db002.sto2.example.com",
+            "pg_version": "17.10",
+            "ip_address": "127.2.22.106",
+            "role": {
+                "primary": {
+                    "health": {
+                        "timeline_id": 11,
+                        "system_identifier": "7305215457781660034",
+                        "current_time": "2026-09-30T12:46:57.206514Z",
+                        "timeline_history": "1\t14A/20000A0\tno recovery target specified\n\n2\t14C/E20000A0\tno recovery target specified\n\n3\t14D/AD0000A0\tno recovery target specified\n\n4\t15D/1A0000A0\tno recovery target specified\n\n5\t1A4/E30000A0\tno recovery target specified\n\n6\t1A5/80000A0\tno recovery target specified\n\n7\t31C/CE0000A0\tno recovery target specified\n\n8\t73B/AF0000A0\tno recovery target specified\n\n9\t747/A1509BE0\tno recovery target specified\n\n10\t747/A2FFFC18\tno recovery target specified\n",
+                        "uptime": "05:25:11.664421",
+                        "current_wal_lsn": "747/B80110F8",
+                        "configuration": {
+                            "wal_level": "logical",
+                            "archive_mode": "on",
+                            "archive_command": "/usr/bin/pgbackrest --stanza=dev-pg-app002 archive-push %p",
+                            "max_wal_senders": "35",
+                            "synchronous_commit": "remote_apply",
+                            "wal_sender_timeout": "300000",
+                            "max_replication_slots": "30",
+                            "synchronous_standby_names": "ANY 1 ( dev_pg_app002_db001, dev_pg_app002_db003 )"
+                        },
+                        "replication": [],
+                        "archiver": {
+                            "archived_count": 22,
+                            "failed_count": 0,
+                            "last_archived_wal": "0000000B00000747000000B7",
+                            "last_archived_time": "2026-09-30T12:36:48.472743Z",
+                            "last_failed_wal": null,
+                            "last_failed_time": null
+                        },
+                        "replication_slots": []
+                    }
+                }
+            },
+            "errors": []
+        },
+        {
+            "id": 96,
+            "cluster_id": 34,
+            "node_name": "dev-pg-app002-db003.sto3.example.com",
+            "pg_version": "17.10",
+            "ip_address": "127.3.22.106",
+            "role": {
+                "replica": {
+                    "health": {
+                        "timeline_id": 10,
+                        "system_identifier": "7305215457781660034",
+                        "current_time": "2026-09-30T12:46:57.179614Z",
+                        "wal_receiver": {
+                            "pid": 3109670,
+                            "status": "streaming",
+                            "receive_start_lsn": "747/AE000000",
+                            "receive_start_tli": 10,
+                            "written_lsn": "748/33F47A30",
+                            "flushed_lsn": "748/33F47A30",
+                            "received_tli": 10,
+                            "last_msg_send_time": "2026-09-30T12:46:56.985912Z",
+                            "last_msg_receipt_time": "2026-09-30T12:46:56.986301Z",
+                            "latest_end_lsn": "748/33F47A30",
+                            "latest_end_time": "2026-09-30T12:46:56.985912Z",
+                            "slot_name": null,
+                            "sender_host": "127.1.22.106",
+                            "sender_port": 5432,
+                            "conninfo": "user=replicator passfile=/var/lib/pgsql/.pgpass channel_binding=prefer connect_timeout=2 dbname=replication host=127.1.22.106 port=5432 application_name=dev_pg_app002_db003 fallback_application_name=walreceiver sslmode=require sslcompression=0 sslsni=1 ssl_min_protocol_version=TLSv1.2 gssencmode=prefer krbsrvname=postgres target_session_attrs=any"
+                        },
+                        "lag": {
+                            "apply_lag_bytes": 0,
+                            "last_transaction_replay_at": "2026-09-30T12:46:56.984877Z"
+                        },
+                        "conflicts_by_db": {},
+                        "configuration": {
+                            "primary_conninfo": "user=replicator connect_timeout=2 host=127.1.22.106 sslmode=require application_name=dev_pg_app002_db003",
+                            "primary_slot_name": "",
+                            "hot_standby": "on",
+                            "recovery_target_timeline": "latest"
+                        },
+                        "last_wal_replay_lsn": "748/33F47A30",
+                        "last_wal_receive_lsn": "748/33F47A30"
+                    }
+                }
+            },
+            "errors": []
+        }
+    ]
+}

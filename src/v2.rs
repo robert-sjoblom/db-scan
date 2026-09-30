@@ -36,6 +36,29 @@ pub(crate) mod tests_common {
         }
     }
 
+    /// Live split brains seen on 2026-09-30, anonymized to the `dev-pg-appNNN` scheme.
+    /// Named by ADR-002 case-matrix row and the resolution each must yield.
+    pub mod split_brain {
+        use crate::v2::cluster::Cluster;
+
+        static C_A_BOTH_JSON: &str = include_str!("../tests/fixtures/split_brain/C_A_BOTH.json");
+        static C_B_LOWER_TIMELINE_HAS_QUORUM_JSON: &str =
+            include_str!("../tests/fixtures/split_brain/C_B_LOWER_TIMELINE_HAS_QUORUM.json");
+
+        /// Row C-a: db003 was re-pointed at the promoted db002 (TL=11) and the old
+        /// primary db001 (TL=10) is an unfenced zombie with no follower.
+        pub fn c_a_both() -> Cluster {
+            serde_json::from_str::<Cluster>(C_A_BOTH_JSON).unwrap()
+        }
+
+        /// Row C-b/C-c: db002 promoted itself to TL=11 while isolated; db003 kept
+        /// streaming from db001 (TL=10) past the fork, so db001 holds acknowledged
+        /// writes db002 lacks.
+        pub fn c_b_lower_timeline_has_quorum() -> Cluster {
+            serde_json::from_str::<Cluster>(C_B_LOWER_TIMELINE_HAS_QUORUM_JSON).unwrap()
+        }
+    }
+
     pub struct PrimaryHealthBuilder {
         current_time: DateTime<Utc>,
         replication_count: usize,
@@ -59,6 +82,14 @@ pub(crate) mod tests_common {
             let mut configuration = HashMap::new();
             configuration.insert("archive_mode".to_owned(), "on".to_owned());
             configuration.insert("synchronous_commit".to_owned(), "on".to_owned());
+            // db001's list: `ANY 1` over the other two nodes in application-name form.
+            // Postgres rejects a zero count, so a primary with no live follower among
+            // these names reports quorum unsatisfied. Tests that name their nodes
+            // differently override via with_synchronous_standby_names.
+            configuration.insert(
+                "synchronous_standby_names".to_owned(),
+                "ANY 1 ( dev_pg_app001_db002, dev_pg_app001_db003 )".to_owned(),
+            );
             Self {
                 current_time: DateTime::<Utc>::UNIX_EPOCH,
                 replication_count: 0,
