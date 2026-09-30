@@ -228,7 +228,7 @@ Output           454 ms
 Total           1.78 s
 STATUS   CLUSTER        PRIMARY                    REPLICAS              LAG DISK REASON
 HEALTHY  dev-pg-app001  db001@sto1                 db002,db003           -   -    -
-CRITICAL prod-pg-app123 db001@sto1⁷ vs db002@sto2⁸ db003@sto3->db001@sto1 -   -    SplitBrain: replica overrides timeline (7 < 8)
+CRITICAL prod-pg-app123 db001@sto1⁷ vs db002@sto2⁸ db003@sto3->db001@sto1 -   -    SplitBrain: keep db001@sto1 (lower TL=7, has quorum), fence db002@sto2 (TL=8, quorum unsatisfied)
 
 ⁷ = timeline id
 ```

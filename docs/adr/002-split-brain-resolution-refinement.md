@@ -125,6 +125,10 @@ enum Confidence {
 - `Confidence::Refuse` means *the tool declines to interpret the evidence* because a sanity gate failed. The `resolution` field still carries the timeline-based pick for completeness, but downstream consumers should treat it as not-actionable.
 - `SplitBrainResolution::Indeterminate` (kept) means *the evidence itself is inconclusive* (e.g., equal timelines with no replica evidence). Confidence is then `BestEffort`.
 
+**Rendering.** `Refuse` replaces the resolution text with `REFUSE/<gate>` (§4, item 1). `Conflicting` keeps the resolution text and prefixes it with `CONFLICTING/`, so a verdict the resolver found evidence against is distinguishable from a clean `BestEffort` one on the row itself, not only in `details_json`. `BestEffort` carries no marker.
+
+**`PrimaryQuorumUnsatisfied` and confidence.** The finding lowers confidence to `Conflicting` only when it names the *elected* primary: keeping a primary that cannot currently satisfy its quorum is shaky, but not a break of the safety model. The same finding on a stale primary is the evidence behind the pick and leaves `BestEffort` intact. Consequence: `HigherTimeline` verdicts are always `Conflicting`, because that variant fires only when no primary has a live follower, so the elected primary's own quorum is unsatisfied. That is the intended reading of a timeline-only pick.
+
 ### 4. Findings list and variant rename
 
 Add `findings: Vec<SplitBrainFinding>` to `SplitBrainInfo`. Order: sanity-gate failures, then contradictions, then corroboration. Cap at ~5 surfaced items.
@@ -156,12 +160,13 @@ v1 finding categories:
 Operator-facing output (`reason.short`) must surface enough information for incident triage. The following are mandated, not polish — without them the design has no operational effect even when the resolver is internally correct:
 
 1. **`Confidence::Refuse` overrides the resolution variant in the short string.** Lead with `REFUSE/` and name the failed sanity gate (e.g. `REFUSE/SplitBrain: system_identifier mismatch (db003 vs db001/db002)`). The resolution-variant text MUST NOT appear when Refuse fires, to prevent operators from acting on a winner pick that is not actionable. **Carve-out (deferred 2026-06-07 — see §7):** `DivergentReplicaWal` was to surface inline even under Refuse, with a rebuild instruction. That is deferred along with the finding's detection; nothing emits it today, so the carve-out is dormant.
-2. **`LowerTimelineHasQuorum` short string MUST name the action**, not the mechanism. Acceptable: `SplitBrain: db001 has quorum (lower TL=N), fence db002 (TL=N+1, quorum-blocked)`. Not acceptable: `SplitBrain: replica overrides timeline (N < N+1)` — that phrasing is paradox-shaped and was the trigger for the rename in the first place.
-3. **`PrimaryQuorumUnsatisfied` MUST appear inline in the short string** when present, since it explains why the higher-TL primary lost. Without it the verdict reads as a paradox.
+2. **`LowerTimelineHasQuorum` short string MUST name the action**, not the mechanism. Acceptable: `SplitBrain: keep db001@sto1 (lower TL=N, has quorum), fence db002@sto2 (TL=N+1, quorum unsatisfied)`. Not acceptable: `SplitBrain: replica overrides timeline (N < N+1)` — that phrasing is paradox-shaped and was the trigger for the rename in the first place.
+3. **`PrimaryQuorumUnsatisfied` MUST appear inline in the short string** when present, since it explains why the higher-TL primary lost. Without it the verdict reads as a paradox. Each node named in the string carries a quorum clause *derived from the finding naming that node*: `quorum unsatisfied` when one exists, `has quorum` when none does. The writer MUST NOT assert a quorum state per variant; in particular `HigherTimeline` fires only when no primary has a live follower, so its elected primary reads `quorum unsatisfied`, never `has quorum`.
 4. **`DivergentReplicaWal`, when present, MUST surface inline in the SplitBrain short string** and MUST set `Confidence::Refuse`. **(Revised 2026-06-07.)** The original text mandated a remediation string `rebuild <replica> from <true-primary>`. That is now deferred, for two reasons:
    - **Direction.** The correct remediation is to **keep the lower TL and discard/rebuild the higher TL** — the lower-TL primary holds the acknowledged writes; the higher-TL primary was isolated and (by the cluster's quorum-sync invariant) committed nothing on its fork. So the node to rebuild is the *higher-TL primary* (and the divergent replica re-points onto the lower-TL true primary), not "the replica, from whatever the resolver currently calls true-primary." The template only produces the right instruction once the resolver actually names the **lower-TL** node as `true_primary` — which today it does not in C-g (it mis-picks `HigherTimeline`). Emitting a rebuild *direction* before that verdict-flip exists would print a backwards, data-destroying instruction.
    - **Until then, surface evidence + `Refuse`, not an action.** Render the raw facts inline — e.g. `REFUSE/SplitBrain: divergent committed WAL — db003 flushed past TL=N fork @ <lsn>; acked writes may exist only on lower TL` — and stop. This still prevents the silent-corruption path (an operator who sees `Refuse` + "acked writes diverged" will not blindly `repmgr standby follow`), without asserting a remediation the tool cannot yet substantiate. The rebuild verb (tear down + basebackup, not pg_rewind; archive-vs-fresh is operator judgment) returns once the verdict-flip lands (§7).
 5. **`SystemIdentifierMismatch` and `SynchronousCommitWeakened` are escalation-worthy** independent of the split-brain verdict; they should drive an alerting path distinct from routine SplitBrain rendering.
+6. **`Confidence::Conflicting` is rendered as a `CONFLICTING/` prefix** on the otherwise unchanged resolution text (§3). Node names render in the PRIMARY column's `db002@sto3` form, so the same node reads the same way across the row.
 
 Phrasing is implementation detail; the *minimum information content* listed above is spec.
 
@@ -169,14 +174,16 @@ Phrasing is implementation detail; the *minimum information content* listed abov
 
 | Resolution | Short-string template |
 |---|---|
-| `Both` | `SplitBrain: {true} has quorum (TL={hi}), demote {stale} (TL={lo}, quorum unsatisfied)` |
-| `LowerTimelineHasQuorum` | `SplitBrain: {true} has quorum (lower TL={lo}), fence {stale} (TL={hi}, quorum-blocked)` |
-| `HigherTimeline` | `SplitBrain: {true} has quorum (TL={hi}), demote {stale} (TL={lo}, no live replicas)` |
-| `ReplicaFollowing` | `SplitBrain: {true} has quorum (TL={tl}), demote {stale} (same TL)` |
+| `Both` | `SplitBrain: keep {true} (TL={hi}, {q}), demote {stale} (TL={lo}, {q})` |
+| `LowerTimelineHasQuorum` | `SplitBrain: keep {true} (lower TL={lo}, {q}), fence {stale} (TL={hi}, {q})` |
+| `HigherTimeline` | `SplitBrain: keep {true} (TL={hi}, {q}), demote {stale} (TL={lo}, {q}); no live replicas` |
+| `ReplicaFollowing` | `SplitBrain: keep {true} ({q}), demote {stale} ({q}); same TL` |
 | `Indeterminate` | `SplitBrain: cannot determine true primary (insufficient evidence)` |
 
+`{true}` and `{stale}` render as `db002@sto3`; `{q}` is `has quorum` or `quorum unsatisfied`, derived per node from `PrimaryQuorumUnsatisfied` (item 3). `Conflicting` prefixes the whole string with `CONFLICTING/`; `Refuse` replaces it (item 1). `ReplicaFollowing` carries no timeline and the variants gain no fields, so it says `same TL` instead.
+
 Findings concatenation:
-- `PrimaryQuorumUnsatisfied` is the source of the "quorum unsatisfied/blocked/no live replicas" inline text and is consumed by the template above, not separately appended.
+- `PrimaryQuorumUnsatisfied` is the source of each node's `{q}` clause and is consumed by the template above, not separately appended. `no live replicas` and `same TL` are variant preconditions, not findings.
 - `DivergentReplicaWal` rendering is deferred (§7); nothing emits it today. When it returns it must follow §7's corrected direction (keep lower TL / rebuild the higher-TL node), not the original "rebuild `<replica>` from `<true-primary>`".
 - Other findings appear in `details_json`, not in `short`.
 

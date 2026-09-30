@@ -1399,8 +1399,8 @@ mod cluster_state_tests {
         );
         assert!(
             table.contains(
-                "SplitBrain: dev-pg-app002-db001.sto1.example.com has quorum (lower TL=10), \
-                 fence dev-pg-app002-db002.sto2.example.com (TL=11, quorum-blocked)"
+                "SplitBrain: keep db001@sto1 (lower TL=10, has quorum), \
+                 fence db002@sto2 (TL=11, quorum unsatisfied)"
             ),
             "table was:\n{table}"
         );
@@ -1464,8 +1464,8 @@ mod cluster_state_tests {
         );
         assert!(
             table.contains(
-                "SplitBrain: dev-pg-app003-db002.sto3.example.com has quorum (TL=11), \
-                 demote dev-pg-app003-db001.sto2.example.com (TL=10, quorum unsatisfied)"
+                "SplitBrain: keep db002@sto3 (TL=11, has quorum), \
+                 demote db001@sto2 (TL=10, quorum unsatisfied)"
             ),
             "table was:\n{table}"
         );

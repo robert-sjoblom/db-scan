@@ -652,10 +652,10 @@ fn format_reason(reason: Reason, verdict: &Verdict) -> (String, String) {
 /// Every finding is serialized into the details JSON; only the sanity gates and
 /// the resolution reach the operator-facing short string.
 fn split_brain_reason(info: &SplitBrainInfo) -> (String, String) {
-    let short = if matches!(info.confidence, Confidence::Refuse) {
-        format_refuse(info)
-    } else {
-        format_resolution(info)
+    let short = match info.confidence {
+        Confidence::Refuse => format_refuse(info),
+        Confidence::Conflicting => format!("CONFLICTING/{}", format_resolution(info)),
+        Confidence::BestEffort => format_resolution(info),
     };
     let details = serde_json::to_string(info).unwrap_or_else(|_| "{}".to_owned());
     (short, details)
@@ -690,11 +690,13 @@ fn format_refuse(info: &SplitBrainInfo) -> String {
     format!("REFUSE/SplitBrain: {}", gate)
 }
 
-/// The variant-to-action mapping from ADR-002 §4: name the action to take, not the
-/// signal that decided it. The parenthetical on the stale primary is fixed per
-/// variant -- it reports the quorum state the variant already implies.
+/// The variant-to-action mapping from ADR-002 §4: name the action.
 fn format_resolution(info: &SplitBrainInfo) -> String {
-    let stale = info.stale_primaries.first().map_or("", String::as_str);
+    let true_primary = extract_db_number(&info.true_primary);
+    let true_quorum = quorum_clause(info, &info.true_primary);
+    let stale_name = info.stale_primaries.first().map_or("", String::as_str);
+    let stale = extract_db_number(stale_name);
+    let stale_quorum = quorum_clause(info, stale_name);
 
     match &info.resolution {
         SplitBrainResolution::Both {
@@ -702,31 +704,47 @@ fn format_resolution(info: &SplitBrainInfo) -> String {
             stale_timeline,
             ..
         } => format!(
-            "SplitBrain: {} has quorum (TL={}), demote {} (TL={}, quorum unsatisfied)",
-            info.true_primary, true_primary_timeline, stale, stale_timeline
+            "SplitBrain: keep {true_primary} (TL={true_primary_timeline}, {true_quorum}), \
+             demote {stale} (TL={stale_timeline}, {stale_quorum})"
         ),
         SplitBrainResolution::LowerTimelineHasQuorum {
             true_primary_timeline,
             stale_timeline,
             ..
         } => format!(
-            "SplitBrain: {} has quorum (lower TL={}), fence {} (TL={}, quorum-blocked)",
-            info.true_primary, true_primary_timeline, stale, stale_timeline
+            "SplitBrain: keep {true_primary} (lower TL={true_primary_timeline}, {true_quorum}), \
+             fence {stale} (TL={stale_timeline}, {stale_quorum})"
         ),
         SplitBrainResolution::HigherTimeline {
             true_primary_timeline,
             stale_timeline,
         } => format!(
-            "SplitBrain: {} has quorum (TL={}), demote {} (TL={}, no live replicas)",
-            info.true_primary, true_primary_timeline, stale, stale_timeline
+            "SplitBrain: keep {true_primary} (TL={true_primary_timeline}, {true_quorum}), \
+             demote {stale} (TL={stale_timeline}, {stale_quorum}); no live replicas"
         ),
         SplitBrainResolution::ReplicaFollowing { .. } => format!(
-            "SplitBrain: {} has quorum, demote {} (same TL)",
-            info.true_primary, stale
+            "SplitBrain: keep {true_primary} ({true_quorum}), demote {stale} ({stale_quorum}); \
+             same TL"
         ),
         SplitBrainResolution::Indeterminate => {
             "SplitBrain: cannot determine true primary (insufficient evidence)".to_owned()
         }
+    }
+}
+
+/// A missing finding means the quorum was satisfied: the §2 gates guarantee every
+/// candidate primary's `synchronous_standby_names` parsed and the derivation ran for it.
+fn quorum_clause(info: &SplitBrainInfo, node: &str) -> &'static str {
+    let unsatisfied = info.findings.iter().any(|finding| {
+        matches!(
+            finding,
+            SplitBrainFinding::PrimaryQuorumUnsatisfied { primary, .. } if primary == node
+        )
+    });
+    if unsatisfied {
+        "quorum unsatisfied"
+    } else {
+        "has quorum"
     }
 }
 
@@ -843,5 +861,118 @@ mod tests {
             "details were: {details}"
         );
         assert!(details.contains("db003"), "details were: {details}");
+    }
+
+    #[test]
+    fn resolution_text_uses_display_names_not_fqdns() {
+        let info = SplitBrainInfo {
+            true_primary: "dev-pg-app003-db002.sto3.example.com".to_owned(),
+            stale_primaries: vec!["dev-pg-app003-db001.sto2.example.com".to_owned()],
+            resolution: SplitBrainResolution::Both {
+                true_primary_timeline: 11,
+                stale_timeline: 10,
+                replicas_following_true: vec!["dev-pg-app003-db003.sto1.example.com".to_owned()],
+            },
+            confidence: Confidence::BestEffort,
+            findings: vec![SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                primary: "dev-pg-app003-db001.sto2.example.com".to_owned(),
+                required: 1,
+                observed: 0,
+            }],
+        };
+
+        let (short, _) = split_brain_reason(&info);
+
+        assert!(short.contains("keep db002@sto3"), "short was: {short}");
+        assert!(short.contains("demote db001@sto2"), "short was: {short}");
+        assert!(!short.contains("example.com"), "short was: {short}");
+    }
+
+    #[test]
+    fn quorum_clauses_are_derived_from_findings() {
+        let info = SplitBrainInfo {
+            true_primary: "db002".to_owned(),
+            stale_primaries: vec!["db001".to_owned()],
+            resolution: SplitBrainResolution::Both {
+                true_primary_timeline: 11,
+                stale_timeline: 10,
+                replicas_following_true: vec!["db003".to_owned()],
+            },
+            confidence: Confidence::BestEffort,
+            findings: vec![SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                primary: "db001".to_owned(),
+                required: 1,
+                observed: 0,
+            }],
+        };
+
+        let (short, _) = split_brain_reason(&info);
+
+        assert_eq!(
+            short,
+            "SplitBrain: keep db002 (TL=11, has quorum), demote db001 (TL=10, quorum unsatisfied)"
+        );
+    }
+
+    #[test]
+    fn higher_timeline_does_not_claim_quorum_for_elected_primary() {
+        // HigherTimeline fires only when no primary has a live follower, so the
+        // elected primary carries its own finding too.
+        let info = SplitBrainInfo {
+            true_primary: "db002".to_owned(),
+            stale_primaries: vec!["db001".to_owned()],
+            resolution: SplitBrainResolution::HigherTimeline {
+                true_primary_timeline: 11,
+                stale_timeline: 10,
+            },
+            confidence: Confidence::Conflicting,
+            findings: vec![
+                SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                    primary: "db001".to_owned(),
+                    required: 1,
+                    observed: 0,
+                },
+                SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                    primary: "db002".to_owned(),
+                    required: 1,
+                    observed: 0,
+                },
+            ],
+        };
+
+        let (short, _) = split_brain_reason(&info);
+
+        assert!(!short.contains("has quorum"), "short was: {short}");
+        assert!(
+            short.contains("keep db002 (TL=11, quorum unsatisfied)"),
+            "short was: {short}"
+        );
+        assert!(short.ends_with("; no live replicas"), "short was: {short}");
+    }
+
+    #[test]
+    fn conflicting_confidence_is_prefixed() {
+        let info = SplitBrainInfo {
+            true_primary: "db002".to_owned(),
+            stale_primaries: vec!["db001".to_owned()],
+            resolution: SplitBrainResolution::Both {
+                true_primary_timeline: 11,
+                stale_timeline: 10,
+                replicas_following_true: vec!["db003".to_owned()],
+            },
+            confidence: Confidence::Conflicting,
+            findings: vec![SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                primary: "db002".to_owned(),
+                required: 1,
+                observed: 0,
+            }],
+        };
+
+        let (short, _) = split_brain_reason(&info);
+
+        assert!(
+            short.starts_with("CONFLICTING/SplitBrain: keep db002"),
+            "short was: {short}"
+        );
     }
 }
