@@ -1341,6 +1341,136 @@ mod cluster_state_tests {
         );
     }
 
+    #[test]
+    fn c_b_capture_resolves_lower_timeline_has_quorum() {
+        use crate::v2::analyze::split_brain::{
+            ReplicationLink, SplitBrainFinding, SplitBrainInfo, SplitBrainResolution,
+        };
+        use crate::v2::tests_common::split_brain::c_b_lower_timeline_has_quorum;
+
+        let actual = analyze(c_b_lower_timeline_has_quorum());
+
+        assert_eq!(
+            actual.verdict.cluster_verdict(),
+            Some(&ClusterVerdict::SplitBrain(SplitBrainInfo {
+                true_primary: "dev-pg-app002-db001.sto1.example.com".to_owned(),
+                stale_primaries: vec!["dev-pg-app002-db002.sto2.example.com".to_owned()],
+                resolution: SplitBrainResolution::LowerTimelineHasQuorum {
+                    true_primary_timeline: 10,
+                    stale_timeline: 11,
+                    replicas_following_true: vec![
+                        "dev-pg-app002-db003.sto3.example.com".to_owned(),
+                    ],
+                },
+                confidence: Confidence::BestEffort,
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
+                        "dev-pg-app002-db001.sto1.example.com",
+                        "dev-pg-app002-db003.sto3.example.com",
+                    )),
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "dev-pg-app002-db002.sto2.example.com".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
+            })),
+        );
+    }
+
+    #[test]
+    fn c_b_capture_renders_keep_lower_timeline_fence_higher() {
+        use crate::v2::tests_common::split_brain::c_b_lower_timeline_has_quorum;
+
+        let health = classify::classify(analyze(c_b_lower_timeline_has_quorum()));
+        let table = crate::v2::writer::render_for_tests(&health);
+
+        assert!(
+            table.contains("CRITICAL dev-pg-app002"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains("db001@sto1\u{b9}\u{2070} vs db002@sto2\u{b9}\u{b9}"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains("db003@sto3\u{2192}db001@sto1"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains(
+                "SplitBrain: dev-pg-app002-db001.sto1.example.com has quorum (lower TL=10), \
+                 fence dev-pg-app002-db002.sto2.example.com (TL=11, quorum-blocked)"
+            ),
+            "table was:\n{table}"
+        );
+    }
+
+    #[test]
+    fn c_a_capture_resolves_both() {
+        use crate::v2::analyze::split_brain::{
+            ReplicationLink, SplitBrainFinding, SplitBrainInfo, SplitBrainResolution,
+        };
+        use crate::v2::tests_common::split_brain::c_a_both;
+
+        let actual = analyze(c_a_both());
+
+        assert_eq!(
+            actual.verdict.cluster_verdict(),
+            Some(&ClusterVerdict::SplitBrain(SplitBrainInfo {
+                true_primary: "dev-pg-app003-db002.sto3.example.com".to_owned(),
+                stale_primaries: vec!["dev-pg-app003-db001.sto2.example.com".to_owned()],
+                resolution: SplitBrainResolution::Both {
+                    true_primary_timeline: 11,
+                    stale_timeline: 10,
+                    replicas_following_true: vec![
+                        "dev-pg-app003-db003.sto1.example.com".to_owned(),
+                    ],
+                },
+                confidence: Confidence::BestEffort,
+                findings: vec![
+                    SplitBrainFinding::BidirectionalFlushingConfirmed(ReplicationLink::new(
+                        "dev-pg-app003-db002.sto3.example.com",
+                        "dev-pg-app003-db003.sto1.example.com",
+                    )),
+                    SplitBrainFinding::PrimaryQuorumUnsatisfied {
+                        primary: "dev-pg-app003-db001.sto2.example.com".to_owned(),
+                        required: 1,
+                        observed: 0,
+                    },
+                ],
+            })),
+        );
+    }
+
+    #[test]
+    fn c_a_capture_renders_demote_zombie() {
+        use crate::v2::tests_common::split_brain::c_a_both;
+
+        let health = classify::classify(analyze(c_a_both()));
+        let table = crate::v2::writer::render_for_tests(&health);
+
+        assert!(
+            table.contains("CRITICAL dev-pg-app003"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains("db002@sto3\u{b9}\u{b9} vs db001@sto2\u{b9}\u{2070}"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains("db003@sto1\u{2192}db002@sto3"),
+            "table was:\n{table}"
+        );
+        assert!(
+            table.contains(
+                "SplitBrain: dev-pg-app003-db002.sto3.example.com has quorum (TL=11), \
+                 demote dev-pg-app003-db001.sto2.example.com (TL=10, quorum unsatisfied)"
+            ),
+            "table was:\n{table}"
+        );
+    }
+
     fn make_node_with_disk(
         id: u32,
         name: &str,
