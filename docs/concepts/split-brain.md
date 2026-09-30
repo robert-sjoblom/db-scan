@@ -4,7 +4,7 @@ This explains the domain model the split-brain resolver depends on. It is **not*
 
 ## The setup
 
-Three nodes, `synchronous_standby_names = 'ANY 1 (A, B)'`, `synchronous_commit = on`. Normally: one primary, two replicas. The tool runs **after** a failover, in stable-but-degraded state. The incident class is **slow fencing**: the old primary was supposed to be demoted but the fence didn't take, so a scan sees *two* primaries:
+Three nodes, `synchronous_standby_names = 'ANY 1 (A, B)'`, `synchronous_commit = on` or stronger (this fleet runs `remote_apply`; everything below holds for both). Normally: one primary, two replicas. The tool runs **after** a failover, in stable-but-degraded state. The incident class is **slow fencing**: the old primary was supposed to be demoted but the fence didn't take, so a scan sees *two* primaries:
 
 - **db001**: the pre-failover primary, still on timeline **TL=N**, still running because the fence failed ("zombie").
 - **db002**: was a replica, got promoted to **TL=N+1**.
@@ -12,7 +12,7 @@ Three nodes, `synchronous_standby_names = 'ANY 1 (A, B)'`, `synchronous_commit =
 
 ## The quorum-sync invariant (and its one failure mode)
 
-Under `ANY 1 (A, B)` with `synchronous_commit = on`, a primary **does not acknowledge a client commit until a standby has flushed (fsync'd) that WAL.** Consequence: an *isolated* primary -- one with no live standby acking it -- physically cannot commit. This is why write divergence is normally *structurally* prevented: two primaries can't both be acking writes unless they each have a standby flushing for them.
+Under `ANY 1 (A, B)` with `synchronous_commit = on`, a primary **does not acknowledge a client commit until a standby has flushed (fsync'd) that WAL.** Consequence: an *isolated* primary -- one with no live standby acking it -- cannot *acknowledge* a commit. It still writes and flushes the commit record locally before it starts waiting (`xact.c` calls `SyncRepWaitForLSN` only after the record is durable), so the transaction's effects are visible to other sessions on that node, and a cancelled wait warns that the transaction "has already committed locally". What is withheld is the client's success reply; "no *acknowledged* writes" is the property everything below relies on. This is why acknowledged-write divergence is normally *structurally* prevented: two primaries can't both be acking writes unless they each have a standby flushing for them.
 
 The failure mode this whole subsystem exists for: in a 3-node cluster the two primaries share a single pool of possible standbys (just db003), so the invariant holds **only while db003 acks at most one of them**. The danger is entirely about *which* primary db003 was acking, and when.
 
@@ -67,13 +67,13 @@ Anchoring to the winner suppresses the signal precisely when there are acked wri
 
 In the split-brain scope there are exactly two candidate primaries and one replica. db002's quorum can be satisfied **only by db003** (a peer primary isn't its standby; a primary isn't its own). A replica is on one timeline at a time. So:
 
-> If db003 is observably on TL=N (acking db001), then db002 had no acker and -- under `synchronous_commit = on` -- **provably committed nothing on TL=N+1.** Its fork is empty.
+> If db003 is observably on TL=N (acking db001), then db002 had no acker and -- under `synchronous_commit = on` -- **provably acknowledged nothing on TL=N+1.** Its fork may hold locally committed, unacknowledged transactions, but no client was told they succeeded.
 
-This is why, when db003's allegiance is observable, the verdict can be **confident** ("keep db001, fence db002 -- its fork is empty"), not merely conservative. The whole "is this safe?" question reduces, in a 3-node cluster, to "is db003 acking db002?".
+This is why, when db003's allegiance is observable, the verdict can be **confident** ("keep db001, fence db002 -- nothing on its fork was acknowledged"), not merely conservative. The whole "is this safe?" question reduces, in a 3-node cluster, to "is db003 acking db002?".
 
 ## Remediation direction: keep the lower TL
 
-When db003's WAL proves acked writes on TL=N that db002 lacks, the correct action is **keep the lower TL (db001), discard/rebuild the higher TL (db002).** db002 was isolated and committed nothing on its fork (the 3-node proof) -- it is the empty branch. The divergent node to *rebuild* is db002; db003 re-points to db001. The intuitive "promote the higher timeline" is exactly the data-losing move here.
+When db003's WAL proves acked writes on TL=N that db002 lacks, the correct action is **keep the lower TL (db001), discard/rebuild the higher TL (db002).** db002 was isolated and acknowledged nothing on its fork (the 3-node proof); discarding it drops only unacknowledged local commits, which is a decision, not a no-op. The divergent node to *rebuild* is db002; db003 re-points to db001. The intuitive "promote the higher timeline" is exactly the data-losing move here.
 
 In this cluster, "rebuild" means **tear down and re-basebackup from the true primary, not `pg_rewind`.** `pg_rewind` would rejoin a divergent node by rewinding it to the fork, but the operational policy here is a clean basebackup; the tool's job is only to name the divergent node and the canonical source: it does not attempt an in-place reconciliation. (Whether the basebackup comes from archive or a fresh copy is operator judgment based on archive integrity.)
 
@@ -82,11 +82,11 @@ In this cluster, "rebuild" means **tear down and re-basebackup from the true pri
 The verdict you can give depends on what you can *see* of db003:
 
 - **db003's allegiance observable** (e.g. it's streaming db001): run the 3-node proof -> **confident** lower-TL verdict.
-- **db003 unobservable** (timeline-wedged, no `wal_receiver`): you cannot prove db002's fork is empty -> **`Refuse`** (decline to auto-resolve).
+- **db003 unobservable** (timeline-wedged, no `wal_receiver`): you cannot prove db002's fork is empty -> the *intended* outcome is **`Refuse`** (decline to auto-resolve). **The tool does not do this today.** With no live follower anywhere it falls through to `HigherTimeline` and prints `CONFLICTING/SplitBrain: keep db002 (TL=N+1, quorum unsatisfied), demote db001 (TL=N, quorum unsatisfied); no live replicas`, which is the data-losing instruction, flagged only by the `CONFLICTING/` prefix and the quorum clauses (ADR-002 row C-g and §7).
 
 This is why the dangerous case is hard: a replica wedged on a timeline divergence may expose *no* `wal_receiver` at all, so the very evidence we need (`received_tli`/`flushed_lsn`) is absent. Data-loss danger and `wal_receiver`-based observability are **anti-correlated** -- the case that most needs detecting is the one streaming stats can't see. Closing that gap means reading the replica's position from the **control file** (`pg_control_checkpoint().timeline_id`, `pg_last_wal_replay_lsn()`), which survives with no receiver -- though surviving is not the same as being current: these positions persist in shared memory for the life of the postmaster, so a non-NULL value can be a stale high-water mark rather than a live position (ADR-002 §7). As of this writing we have **no captured run** of the wedged state, so divergence detection is deferred behind capturing that evidence first (ADR-002 §7).
 
-**What "wedged" looks like in the logs.** When db003 is re-pointed at db002 while already past X on TL=N, db002 refuses to stream it -- db003 *is* ahead of where TL=N+1 forked. The standby logs a `FATAL` of the form:
+**What "wedged" looks like in the logs.** When db003 is re-pointed at db002 while already past X on TL=N, db002 refuses to stream it -- db003 *is* ahead of where TL=N+1 forked. The standby logs it at `LOG` level (not `FATAL`, so a grep for FATAL misses it), of the form:
 
 ```
 new timeline N+1 forked off current database system timeline N before current recovery point X/X

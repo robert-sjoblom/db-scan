@@ -30,8 +30,8 @@ pub enum SplitBrainResolution {
         stale_timeline: i32,
         replicas_following_true: Vec<NodeName>,
     },
-    /// Replica evidence overrides timeline - replicas are following a lower-timeline primary
-    /// This indicates the higher-timeline primary was likely isolated after promotion.
+    /// A live replica is flushing for the lower-timeline primary, which therefore has
+    /// quorum; the higher-timeline primary was isolated after its promotion.
     LowerTimelineHasQuorum {
         true_primary_timeline: i32,
         stale_timeline: i32,
@@ -265,9 +265,9 @@ fn extract_timeline_info<'a>(primaries: &[&'a AnalyzedNode]) -> TimelineInfo<'a>
 ///   - Both pass -> following + `BidirectionalFlushingConfirmed` (plus `ReplicaInCatchup`
 ///     if the primary-side state is `catchup`
 ///
-/// Freshness uses each node's own `current_time` against that same node's recorded
-/// timestamps, so the comparison is intra-node and immune to scanner<->db clock skew
-/// that would otherwise eat into a tight threshold.
+/// Freshness compares each node's own `current_time` with timestamps read from that
+/// same node, so the scanner's clock plays no part. `reply_time` is stamped by the
+/// standby's clock, so the primary-side half is exposed to skew between the two nodes.
 fn build_replica_following_map(
     timeline_info: &TimelineInfo<'_>,
     replicas: &[&AnalyzedNode],
@@ -288,7 +288,9 @@ fn build_replica_following_map(
         let Some(p_health) = primary.role.as_primary() else {
             continue;
         };
-        // `wal_sender_timeout` can differ between primaries
+        // Uses the primary's `wal_sender_timeout`; the replica row's lifetime actually
+        // follows the standby's `wal_receiver_timeout`, which is not collected yet. Both
+        // are 5min fleet-wide, so the threshold holds (ADR-002 §1).
         let threshold_ms = (parse_wal_sender_timeout(&p_health.configuration) / 2) + 30_000;
 
         for replica in replicas {

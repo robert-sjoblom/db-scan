@@ -398,7 +398,7 @@ Multiple nodes return `pg_is_in_recovery() = false`
 1. **HigherTimeline**: Different timeline IDs -> higher timeline is true primary
 2. **ReplicaFollowing**: Equal timelines -> determine which primary replicas are streaming from
 3. **Both**: Timeline and replica evidence agree (high confidence)
-4. **ReplicaOverridesTimeline**: Replicas follow lower-timeline primary
+4. **LowerTimelineHasQuorum**: a live replica is flushing for the lower-timeline primary, which therefore has quorum; the higher-timeline primary was isolated after its promotion
 5. **Indeterminate**: Cannot determine (equal timelines, no replica evidence)
 
 ### 7.3 Timeline Relationship Analysis
