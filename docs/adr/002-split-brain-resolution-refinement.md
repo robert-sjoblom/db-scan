@@ -227,7 +227,7 @@ Additions to `HEALTH_CHECK_REPLICA_QUERY`:
 
   Terminology: this section's "control-file position" shorthand is loose. `pg_control_checkpoint().timeline_id` does come from the control file, but both LSNs are read from shared memory -- they are zeroed by a postmaster restart and do not survive one.
 
-  Rationale: a timeline-wedged replica (matrix C-g) may have **no `wal_receiver` row**, so `received_tli`/`flushed_lsn` are unavailable — exactly the state we most need. The control-file `timeline_id` (already captured) plus an absolute applied LSN let us place the replica relative to a primary's fork LSN even with no live receiver. *Capture only* for now (§7): gather the evidence so the next real C-g is diagnosable; no detection is wired off it yet.
+  Rationale: a timeline-wedged replica (matrix C-g) may have **no `wal_receiver` row**, so `received_tli`/`flushed_lsn` are unavailable — exactly the state we most need. The control-file `timeline_id` (already captured) plus an absolute applied LSN let us place the replica relative to a primary's fork LSN even with no live receiver. *Capture only* for now (§7): gather the evidence so the next real C-g is diagnosable; no detection is wired off it yet. Both positions are emitted, alongside the control-file timeline, in the replica's info-level `replica health check completed` event, so a default-verbosity scan records them; the raw payload is dumped only at debug level and would leave a real C-g undiagnosable (verification F6).
 
 Other:
 
@@ -253,7 +253,7 @@ Future enhancement: re-scan after ≥ `wal_sender_timeout`. If primary set, time
 
 **Why detection is deferred (the data gap).** The original trigger reads `received_tli`/`flushed_lsn` from `pg_stat_wal_receiver`. But a timeline-wedged replica (C-g — the case that matters) likely has *no* `wal_receiver` at all: it cannot establish streaming past the fork. So the original trigger fires in the provably-*safe* case (C-c) and misses the *dangerous* one (C-g) — data-loss danger and `wal_receiver`-based detectability are **anti-correlated**. And we have **no captured run** of the wedged state, so we don't actually know what it exposes. Shipping the trigger now would add over-caution to safe cases and false confidence to the dangerous one, which is why no conservative "Refuse-only floor" is shipped in the interim.
 
-**Decision: capture-first.** Collect db003's timeline and applied LSN from the **control file**, independent of `wal_receiver` (§5), so the wedged state becomes observable and the next real C-g is diagnosable. Defer the `DivergentReplicaWal` emission, its confidence mapping, and the verdict-flip until designed from a captured occurrence. The `DivergentReplicaWal` variant already maps to `Confidence::Refuse` in `determine_confidence_level`, so nothing emits it today — that wiring stays dormant until the detection is built from real data.
+**Decision: capture-first.** Collect db003's timeline and applied LSN from the **control file**, independent of `wal_receiver` (§5), so the wedged state becomes observable and the next real C-g is diagnosable; the positions reach the info-level completion event (§5), not only the debug payload. Defer the `DivergentReplicaWal` emission, its confidence mapping, and the verdict-flip until designed from a captured occurrence. The `DivergentReplicaWal` variant already maps to `Confidence::Refuse` in `determine_confidence_level`, so nothing emits it today — that wiring stays dormant until the detection is built from real data.
 
 ## Out of scope
 

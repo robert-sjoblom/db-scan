@@ -120,14 +120,7 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
 
     let analyzed = match execute_replica_health_check(&client).await {
         Ok(data) => {
-            tracing::info!(
-                timeline_id = data.timeline_id,
-                wal_receiver_status = data.wal_receiver.as_ref().map(|w| &w.status),
-                apply_lag_bytes = data.lag.apply_lag_bytes,
-                conflicts_count = data.conflicts_by_db.len(),
-                primary_conninfo = data.configuration.get("primary_conninfo"),
-                "replica health check completed"
-            );
+            log_health_check_completed(&data);
 
             AnalyzedNode {
                 id: node.id,
@@ -167,6 +160,22 @@ pub(super) async fn check(client: Client, node: Arc<Node>, tx: UnboundedSender<A
             tracing::error!(node_name = %node.name, error = %e, "failed to send health checked replica node");
         }
     }
+}
+
+/// ADR-002 §5 relies on this event: the raw payload is logged at debug level only, so
+/// the applied and received positions have to be here for a default-verbosity scan to
+/// record them.
+fn log_health_check_completed(data: &ReplicaHealthCheckResult) {
+    tracing::info!(
+        timeline_id = data.timeline_id,
+        wal_receiver_status = data.wal_receiver.as_ref().map(|w| &w.status),
+        last_wal_replay_lsn = data.last_wal_replay_lsn.as_deref(),
+        last_wal_receive_lsn = data.last_wal_receive_lsn.as_deref(),
+        apply_lag_bytes = data.lag.apply_lag_bytes,
+        conflicts_count = data.conflicts_by_db.len(),
+        primary_conninfo = data.configuration.get("primary_conninfo"),
+        "replica health check completed"
+    );
 }
 
 #[instrument(skip(client), level = "trace")]
@@ -263,5 +272,50 @@ mod tests {
 
         assert_eq!(result.last_wal_receive_lsn, None);
         assert_eq!(result.last_wal_replay_lsn.as_deref(), Some("6FD/8F96BC00"));
+    }
+
+    #[test]
+    fn completion_event_records_control_file_position() {
+        use std::sync::{Arc, Mutex};
+
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let result: ReplicaHealthCheckResult =
+            serde_json::from_value(replica_health_check_json()).unwrap();
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let sink = Arc::clone(&buf);
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || Sink(Arc::clone(&sink)))
+            .with_ansi(false)
+            .without_time()
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            super::log_health_check_completed(&result);
+        });
+
+        let log = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("replica health check completed"),
+            "log was: {log}"
+        );
+        assert!(log.contains("timeline_id=22"), "log was: {log}");
+        assert!(
+            log.contains("last_wal_replay_lsn=\"6FD/8F96BC00\""),
+            "log was: {log}"
+        );
+        assert!(
+            log.contains("last_wal_receive_lsn=\"6FD/8F96BC00\""),
+            "log was: {log}"
+        );
     }
 }
