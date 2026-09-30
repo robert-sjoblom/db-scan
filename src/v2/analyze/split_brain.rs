@@ -1005,7 +1005,7 @@ mod tests {
 
     #[test]
     fn primaries_disagree_on_sysid_excludes_all_replicas() {
-        // Two primaries hold different sysids → no reference exists → all nodes
+        // Two primaries hold different sysids -> no reference exists -> all nodes
         // flagged; replica is filtered out and resolution falls back to timeline-only.
         let db1 = NodeBuilder::new("db001")
             .with_id(1)
@@ -1450,7 +1450,7 @@ mod tests {
     #[test]
     fn gate_rejects_empty_application_name() {
         // Primary's pg_stat_replication has a row with empty application_name.
-        // Replica-side gate passes, but no row matches "db003" → PrimaryDoesNotSeeReplica.
+        // Replica-side gate passes, but no row matches "db003" -> PrimaryDoesNotSeeReplica.
         let db1 = primary_with_followers(1, "db001", IP_DB1, 11, &[""]);
         let db2 = primary(2, "db002", IP_DB2, 12);
         let db3 = replica_following(3, "db003", IP_DB1, 11);

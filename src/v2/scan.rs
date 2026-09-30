@@ -268,14 +268,14 @@ All nodes:
 
     Current WAL LSN (pg_current_wal_lsn() or pg_last_wal_receive_lsn()/pg_last_wal_replay_lsn() depending on role)
 
-    System identifier (pg_control_system()) → helps validate all nodes belong to same cluster
+    System identifier (pg_control_system()) -> helps validate all nodes belong to same cluster
 
     Connection status of replicas (pg_stat_replication from primary)?
 
 If primary:
-    pg_is_in_recovery() → false
+    pg_is_in_recovery() -> false
 
-    pg_current_wal_lsn() → to calculate replication lag
+    pg_current_wal_lsn() -> to calculate replication lag
 
     SELECT pid, application_name, client_addr, state, sync_state, write_lag, flush_lag, replay_lag FROM pg_stat_replication
 
@@ -292,7 +292,7 @@ If primary:
     Timeline ID (SELECT timeline_id FROM pg_control_checkpoint())
 
 If replica:
-    pg_is_in_recovery() → true
+    pg_is_in_recovery() -> true
 
     pg_last_wal_receive_lsn() and pg_last_wal_replay_lsn()
 

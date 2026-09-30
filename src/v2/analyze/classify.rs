@@ -118,7 +118,7 @@ mod tests {
             // Unknown tier (rank arbitrary; not compared with other tiers).
             Reason::NoNodesReachable => 0,
             Reason::UnexpectedTopology => 1,
-            // Degraded tier, least → most severe.
+            // Degraded tier, least -> most severe.
             Reason::DiskIoErrors => 10,
             Reason::NotInQuorum => 11,
             Reason::ChainedReplica => 12,
@@ -126,7 +126,7 @@ mod tests {
             Reason::HighReplicationLag => 14,
             Reason::ArchiveLagging => 15,
             Reason::ReducedRedundancy => 16,
-            // Critical tier, least → most severe.
+            // Critical tier, least -> most severe.
             Reason::SyncCommitOff => 20,
             Reason::ArchivingDisabled => 21,
             Reason::ArchiveFailure => 22,

@@ -127,7 +127,7 @@ pub enum Reason {
     /// Cluster has unexpected topology (e.g., more than 3 nodes).
     UnexpectedTopology,
 
-    // Degraded reasons (least → most severe within the tier).
+    // Degraded reasons (least -> most severe within the tier).
     /// I/O or block-device errors found in dmesg.
     DiskIoErrors,
     /// One or more streaming replicas have a `sync_state` other than `quorum`.
@@ -145,7 +145,7 @@ pub enum Reason {
     /// outranks lower Degraded findings so it surfaces as the headline reason.
     ReducedRedundancy,
 
-    // Critical reasons (least → most severe within the tier).
+    // Critical reasons (least -> most severe within the tier).
     /// Quorum sync is not activated.
     SyncCommitOff,
     /// Archiving is not enabled.
@@ -249,7 +249,7 @@ pub enum NodeVerdict {
     NotInQuorum,
     SyncCommitOff,
     /// Node is reachable in inventory but unreachable for health checks
-    /// `(Role::Unknown)`. One or more of these → cluster has reduced redundancy.
+    /// `(Role::Unknown)`. One or more of these -> cluster has reduced redundancy.
     Unreachable,
 }
 
@@ -922,7 +922,7 @@ mod cluster_state_tests {
         //
         // Two Critical conditions coexist: ArchiveFailure (durability broken)
         // and WritesBlocked (writers hang waiting for an ack that won't come).
-        // Customer-visible write hang outranks archive failure → headline
+        // Customer-visible write hang outranks archive failure -> headline
         // Reason should be WritesBlocked. The ArchiveFailure node verdict
         // must still be present so the operator sees both findings.
         let mut config = HashMap::new();
@@ -1155,7 +1155,7 @@ mod cluster_state_tests {
         // both replicas streaming with sync_state=async. Empty standby_names
         // means postgres can't actually sync — sync replication is effectively
         // disabled at the primary regardless of sync_commit value. This is a
-        // misconfiguration that puts writes at risk → Critical SyncCommitOff.
+        // misconfiguration that puts writes at risk -> Critical SyncCommitOff.
         let mut config = HashMap::new();
         config.insert("synchronous_commit".to_owned(), "on".to_owned());
         config.insert("synchronous_standby_names".to_owned(), String::new());
@@ -1207,7 +1207,7 @@ mod cluster_state_tests {
     #[test]
     fn test_degraded_when_one_replica_is_potential() {
         // Only one of the two replicas is in Quorum; the other is Potential.
-        // Strict policy: any non-quorum replica → Degraded.
+        // Strict policy: any non-quorum replica -> Degraded.
         // The builder applies sync_state uniformly to all replicas, so we
         // override one entry post-build to get a heterogeneous shape.
         let mut primary_health = PrimaryHealthBuilder::new()
@@ -1394,7 +1394,7 @@ mod cluster_state_tests {
             "table was:\n{table}"
         );
         assert!(
-            table.contains("db003@sto3\u{2192}db001@sto1"),
+            table.contains("db003@sto3->db001@sto1"),
             "table was:\n{table}"
         );
         assert!(
@@ -1459,7 +1459,7 @@ mod cluster_state_tests {
             "table was:\n{table}"
         );
         assert!(
-            table.contains("db003@sto1\u{2192}db002@sto3"),
+            table.contains("db003@sto1->db002@sto3"),
             "table was:\n{table}"
         );
         assert!(
@@ -1593,7 +1593,7 @@ mod cluster_state_tests {
 
     #[test]
     fn disk_degraded_cluster_with_filesystem_errors_upgrades_to_critical() {
-        // Cluster is already Degraded (one replica down) + filesystem errors → Critical
+        // Cluster is already Degraded (one replica down) + filesystem errors -> Critical
         let cluster = make_cluster(vec![
             make_node_with_disk(
                 1,
@@ -1642,7 +1642,7 @@ mod cluster_state_tests {
 
     #[test]
     fn disk_degraded_cluster_with_only_io_errors_stays_degraded_with_pg_reason() {
-        // Cluster is already Degraded (one replica down) + only io errors → still Degraded (pg reason)
+        // Cluster is already Degraded (one replica down) + only io errors -> still Degraded (pg reason)
         let cluster = make_cluster(vec![
             make_node_with_disk(
                 1,
@@ -1683,7 +1683,7 @@ mod cluster_state_tests {
 
     #[test]
     fn disk_critical_cluster_pg_reason_is_preserved() {
-        // Cluster is already Critical (no primary) → filesystem errors don't change the reason
+        // Cluster is already Critical (no primary) -> filesystem errors don't change the reason
         let cluster = make_cluster(vec![
             make_node_with_disk(
                 1,

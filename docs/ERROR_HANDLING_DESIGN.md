@@ -126,9 +126,9 @@ client.query(PRIMARY_HEALTH_QUERY, &[])
 **Result:** Rich error chains without manual propagation:
 ```
 failed to scan node
-  └→ connecting to node: prod-pg-app007-db001.sto1.example.com
-      └→ cluster: prod-pg-app007 (id: 42)
-          └→ TLS handshake failed: certificate verify failed, at db.rs:82
+  └-> connecting to node: prod-pg-app007-db001.sto1.example.com
+      └-> cluster: prod-pg-app007 (id: 42)
+          └-> TLS handshake failed: certificate verify failed, at db.rs:82
 ```
 
 ## Implementation Plan
@@ -139,10 +139,10 @@ failed to scan node
 
 1. Replace `DbError` enum with `DbErrorKind`
 2. Map underlying errors to kinds:
-   - `tokio_postgres::Error` → match on error code/kind
-   - `native_tls::Error` → match on error message patterns
-   - `std::io::Error` → match on `ErrorKind`
-   - `serde_json::Error` → `InvalidResponse`
+   - `tokio_postgres::Error` -> match on error code/kind
+   - `native_tls::Error` -> match on error message patterns
+   - `std::io::Error` -> match on `ErrorKind`
+   - `serde_json::Error` -> `InvalidResponse`
 
 3. Implement `is_retryable()` method
 4. Create `DbError` struct wrapping `DbErrorKind`
@@ -160,7 +160,7 @@ Reference: [`tokio_postgres::error::DbError`](https://docs.rs/tokio-postgres/lat
 
 **File:** `src/v2/db.rs`
 
-1. Change return type: `Result<T, DbError>` → `error_stack::Result<T, DbError>`
+1. Change return type: `Result<T, DbError>` -> `error_stack::Result<T, DbError>`
 2. Add `#[track_caller]` to `connect()` function
 3. Convert underlying errors using `.change_context()`:
    ```rust
@@ -310,7 +310,7 @@ let node = AnalyzedNode::builder()
 - JSON fixtures are valuable as "golden files" showing real cluster states
 
 **Migration path:**
-1. Change `errors: Vec<DbError>` → `errors: Vec<DbErrorKind>`
+1. Change `errors: Vec<DbError>` -> `errors: Vec<DbErrorKind>`
 2. Update existing JSON fixtures to use kind strings (e.g., `"connection_timeout"`)
 3. Tests continue to work, now with actionable kinds
 4. If fixtures become unwieldy, migrate to builders in Phase 7
@@ -375,7 +375,7 @@ let node = AnalyzedNode::builder()
 
 ## Error Mapping Examples
 
-### tokio_postgres::Error → DbErrorKind
+### tokio_postgres::Error -> DbErrorKind
 
 ```rust
 fn classify_postgres_error(err: &tokio_postgres::Error) -> DbErrorKind {
@@ -407,7 +407,7 @@ fn classify_postgres_error(err: &tokio_postgres::Error) -> DbErrorKind {
 }
 ```
 
-### native_tls::Error → DbErrorKind
+### native_tls::Error -> DbErrorKind
 
 ```rust
 fn classify_tls_error(err: &native_tls::Error) -> DbErrorKind {
@@ -422,7 +422,7 @@ fn classify_tls_error(err: &native_tls::Error) -> DbErrorKind {
 }
 ```
 
-### std::io::Error → DbErrorKind
+### std::io::Error -> DbErrorKind
 
 ```rust
 fn classify_io_error(err: &std::io::Error) -> DbErrorKind {

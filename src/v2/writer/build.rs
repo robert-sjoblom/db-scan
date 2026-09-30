@@ -501,7 +501,7 @@ fn format_reason(reason: Reason, verdict: &Verdict) -> (String, String) {
                 return ("ChainedReplica".to_owned(), "{}".to_owned());
             };
             let short = format!(
-                "ChainedReplica: {}→{}",
+                "ChainedReplica: {}->{}",
                 extract_db_number(chained_replica),
                 extract_db_number(upstream_replica)
             );

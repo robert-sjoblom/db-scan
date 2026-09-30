@@ -4,7 +4,7 @@
 
 Proposed (2026-05-19). Incorporates five rounds of agent review.
 
-**Revision (2026-06-07):** §7 (Divergent-WAL) reworked. The original framing treated `DivergentReplicaWal` as a replica-rebuild pointer anchored to the higher-TL primary's fork; that is wrong in two ways — it mis-states the remediation direction and, in the genuinely dangerous case, isn't even observable with the data the original §5 collects. The finding is a **committed-write-divergence safety gate** (→ `Refuse`); the correct remediation is **keep the lower TL, discard/rebuild the higher TL**; and detecting the dangerous case reliably needs control-file evidence we do not yet capture. See the revised §7, the new case-matrix row C-g, and the `DivergentReplicaWal` deferral. We have **no captured run** of the dangerous state, so the precise trigger and the verdict-flip are deferred until designed from real data; a conservative `Refuse`-only floor is shippable today (§7).
+**Revision (2026-06-07):** §7 (Divergent-WAL) reworked. The original framing treated `DivergentReplicaWal` as a replica-rebuild pointer anchored to the higher-TL primary's fork; that is wrong in two ways — it mis-states the remediation direction and, in the genuinely dangerous case, isn't even observable with the data the original §5 collects. The finding is a **committed-write-divergence safety gate** (-> `Refuse`); the correct remediation is **keep the lower TL, discard/rebuild the higher TL**; and detecting the dangerous case reliably needs control-file evidence we do not yet capture. See the revised §7, the new case-matrix row C-g, and the `DivergentReplicaWal` deferral. We have **no captured run** of the dangerous state, so the precise trigger and the verdict-flip are deferred until designed from real data; a conservative `Refuse`-only floor is shippable today (§7).
 
 ## Context
 
@@ -24,7 +24,7 @@ The true primary is the one whose **sync quorum is satisfied and that is activel
 
 - 1 primary + 2 replicas per cluster (replicas A and B). The resolver assumes this topology; >2 replicas is out of scope for v1.
 - `synchronous_standby_names = 'ANY 1 (A, B)'` — quorum is satisfiable by either replica alone
-- `application_name` is **not** the node name — it's a separate namespace. Configuration management derives it from the node's FQDN: the first label, with hyphens replaced by underscores, e.g. `prod-pg-app001-db002.sto1.example.com` → `prod_pg_app001_db002`. Any comparison between `application_name` and `node_name` must apply this transform first; a literal `==` never matches.
+- `application_name` is **not** the node name — it's a separate namespace. Configuration management derives it from the node's FQDN: the first label, with hyphens replaced by underscores, e.g. `prod-pg-app001-db002.sto1.example.com` -> `prod_pg_app001_db002`. Any comparison between `application_name` and `node_name` must apply this transform first; a literal `==` never matches.
 - `wal_sender_timeout = 5min` (300_000 ms). Keepalives are sent at `wal_sender_timeout / 2` ≈ 150 s.
 - Scanner role has `pg_read_server_files` (the tool is run by DBAs, so this privilege is in place)
 
@@ -40,18 +40,18 @@ Whether `db001` is actively committing depends entirely on whether `db003` is fl
 |---|---|---|---|---|---|
 | C-a | `sender_host=db002`, `status=streaming/catchup`, recent receipt | Yes, for `db002` | No (no replica acking it) | `db002` | `Both` (timeline + flushing replica agree) + `BidirectionalFlushingConfirmed(db002, db003)` + `PrimaryQuorumUnsatisfied(db001)` |
 | C-b | `sender_host=db001`, `status=streaming/catchup`, recent receipt, `received_tli=N` | Yes, for `db001` | Yes | **`db001`** — flushing-replica evidence makes this correct under the operational definition | `LowerTimelineHasQuorum` + `BidirectionalFlushingConfirmed(db001, db003)` + `PrimaryQuorumUnsatisfied(db002)` |
-| C-c | Same as C-b, but `db003`'s `flushed_lsn` is past the TL=N→N+1 fork LSN | Yes, for `db001` | Yes | **`db001`** (same as C-b) | C-b verdict (already keeps lower TL = correct direction). `DivergentReplicaWal(db003, …)` is **informational, not Refuse**: in this 3-node cluster `db002`'s only candidate acker is `db003`, and `db003` is observably acking `db001` on TL=N, so `db002` provably client-acked nothing on TL=N+1 (`sync_commit=on`). Its fork is empty → fencing `db002` is safe and the verdict is confident. |
+| C-c | Same as C-b, but `db003`'s `flushed_lsn` is past the TL=N->N+1 fork LSN | Yes, for `db001` | Yes | **`db001`** (same as C-b) | C-b verdict (already keeps lower TL = correct direction). `DivergentReplicaWal(db003, …)` is **informational, not Refuse**: in this 3-node cluster `db002`'s only candidate acker is `db003`, and `db003` is observably acking `db001` on TL=N, so `db002` provably client-acked nothing on TL=N+1 (`sync_commit=on`). Its fork is empty -> fencing `db002` is safe and the verdict is confident. |
 | C-d | `sender_host=db001` but `status ≠ streaming/catchup`, OR `last_msg_receipt_time` aged out | No — gate rejects | No (without `db003` acking, `db001` can't satisfy its quorum) | `db002` | `HigherTimeline` (no flushing replica anywhere) + `ReplicaWalReceiverStale(db003, db001)` |
 | C-e | `sender_host=db002`, actively flushing for `db002`, but `db001`'s `pg_stat_replication` still has a stale row for `db003` (within `wal_sender_timeout` of disconnect) | Yes, for `db002` | No (`db001`'s claimed replica is actually elsewhere) | `db002` | `Both` (replica's `wal_receiver` is authoritative; `db001`'s stale `pg_stat_replication` row is filtered because the replica-side match fails first) + `BidirectionalFlushingConfirmed(db002, db003)` |
 | C-f | `wal_receiver` absent, or `status=stopped/starting`, or blocked on `restore_command` (archive corruption) | No | No (without `db003`, `db001`'s quorum is unsatisfied) | `db002` | `HigherTimeline`; replica-stuck condition surfaced separately (existing archive-failure mechanism) |
-| **C-g** (the dangerous case) | `db003` flushed past the fork on TL=N **while acking `db001`**, but has since been re-pointed at `db002` (TL=N+1) and is **wedged** — it cannot roll forward (its committed TL=N tail past X diverges from TL=N+1) and likely cannot establish a `wal_receiver` at all | No, **now** (but it *did* ack TL=N writes past X earlier) | No, **now** (lost its acker) | **`db001`** — it holds acked writes that exist nowhere else | **Resolver mis-picks `HigherTimeline` → `db002`**, because at scan time no replica is live-following anyone. Acting on that demotes `db001` and **destroys acknowledged transactions.** `DivergentReplicaWal(db003) → Refuse` must override the pick. **Detectability gap:** a wedged replica with no `wal_receiver` exposes no `received_tli`/`flushed_lsn`, so the §5-as-original data cannot prove "past fork" — see §7's capture requirement. |
+| **C-g** (the dangerous case) | `db003` flushed past the fork on TL=N **while acking `db001`**, but has since been re-pointed at `db002` (TL=N+1) and is **wedged** — it cannot roll forward (its committed TL=N tail past X diverges from TL=N+1) and likely cannot establish a `wal_receiver` at all | No, **now** (but it *did* ack TL=N writes past X earlier) | No, **now** (lost its acker) | **`db001`** — it holds acked writes that exist nowhere else | **Resolver mis-picks `HigherTimeline` -> `db002`**, because at scan time no replica is live-following anyone. Acting on that demotes `db001` and **destroys acknowledged transactions.** `DivergentReplicaWal(db003) -> Refuse` must override the pick. **Detectability gap:** a wedged replica with no `wal_receiver` exposes no `received_tli`/`flushed_lsn`, so the §5-as-original data cannot prove "past fork" — see §7's capture requirement. |
 
 The design's correctness rests on three facts visible in the matrix:
 
 1. C-b and C-c are correctly resolved by the renamed `LowerTimelineHasQuorum` variant once the gate has confirmed `db003` is actively flushing for `db001`. The lower-TL primary is the true one *because* a replica is genuinely flushing for it.
 2. C-d, C-e, and the inactive subcases of C-f require the gate to *reject* stale/one-sided evidence that the current code accepts. This is what the gate adds.
 3. The verdict in C-b/C-c is the same whether the higher-TL primary (`db002`) is quorum-satisfied or not — but flagging `PrimaryQuorumUnsatisfied(db002)` in the findings tells the operator "the failover hasn't completed: the new primary has no replicas yet."
-4. C-g is the case the original design missed. The acked writes live on the **lower** TL, but at scan time the lower-TL primary has no *live* follower (its acker wandered off and wedged), so the resolver's live-follower logic falls through to `HigherTimeline` and picks the wrong primary. The only thing standing between that pick and acknowledged-data loss is `DivergentReplicaWal → Refuse`. This is the load-bearing case for the finding — and the one we cannot yet reliably observe (§7).
+4. C-g is the case the original design missed. The acked writes live on the **lower** TL, but at scan time the lower-TL primary has no *live* follower (its acker wandered off and wedged), so the resolver's live-follower logic falls through to `HigherTimeline` and picks the wrong primary. The only thing standing between that pick and acknowledged-data loss is `DivergentReplicaWal -> Refuse`. This is the load-bearing case for the finding — and the one we cannot yet reliably observe (§7).
 
 **Gate precedence is asymmetric, not symmetric AND:** the replica's `wal_receiver` is the authoritative side (it names exactly one sender). The primary's `pg_stat_replication` is corroborating only. If the replica-side gate fails for primary X, no amount of primary-side state on X can rescue the match. This is what makes C-e resolve cleanly — `db001`'s stale row is filtered because `db003`'s `wal_receiver` doesn't name `db001`.
 
@@ -88,13 +88,13 @@ Note that `pg_stat_replication.reply_time` (primary side) and `wal_receiver.last
 
 Rejected as gate inputs (kept available as findings only): raw `flush_lsn` freshness (zombie rows hold fresh values until `wal_sender_timeout` fires), `flush_lag` (stops updating on idle clusters), archive recency (under TL fork the two primaries write different filenames; they do not collide).
 
-### 2. Sanity gates → Refuse
+### 2. Sanity gates -> Refuse
 
 Before resolving, check:
 
-- **`pg_control_system().system_identifier` consistency** across ALL nodes (primaries and replicas). A replica with a foreign `system_identifier` indicates a reseed/restore from an unrelated cluster; this is escalation-worthy regardless of split-brain. Mismatch → `Confidence::Refuse` with `SystemIdentifierMismatch(nodes)`.
+- **`pg_control_system().system_identifier` consistency** across ALL nodes (primaries and replicas). A replica with a foreign `system_identifier` indicates a reseed/restore from an unrelated cluster; this is escalation-worthy regardless of split-brain. Mismatch -> `Confidence::Refuse` with `SystemIdentifierMismatch(nodes)`.
 - **`synchronous_commit` durability** on every candidate primary. The `ANY 1 (A, B)` no-divergence claim depends on the standby actually fsyncing before ack. Refuse if any primary has `synchronous_commit` ∈ {`local`, `off`, `remote_write`, empty}. `remote_write` is included because it does not wait for fsync on the standby. Valid values: `on`, `remote_apply`, `remote_flush`.
-- **`synchronous_standby_names` must actually define a quorum** on every candidate primary. The `synchronous_commit` check above only holds if a standby is named at all: with SSN empty or unparseable, `SyncStandbysDefined()` is false and `synchronous_commit` fast-exits without waiting on any standby, regardless of its setting — so an isolated primary with `synchronous_commit=on` and no SSN acks locally and immediately, and the quorum-sync safety argument this ADR rests on does not hold. Empty/unparseable SSN on a candidate primary → `Confidence::Refuse` with `SyncQuorumDisabled(primary)`. This is independent of the `synchronous_commit` check: a primary can pass that check and still fail this one.
+- **`synchronous_standby_names` must actually define a quorum** on every candidate primary. The `synchronous_commit` check above only holds if a standby is named at all: with SSN empty or unparseable, `SyncStandbysDefined()` is false and `synchronous_commit` fast-exits without waiting on any standby, regardless of its setting — so an isolated primary with `synchronous_commit=on` and no SSN acks locally and immediately, and the quorum-sync safety argument this ADR rests on does not hold. Empty/unparseable SSN on a candidate primary -> `Confidence::Refuse` with `SyncQuorumDisabled(primary)`. This is independent of the `synchronous_commit` check: a primary can pass that check and still fail this one.
 
 In addition to setting `Confidence::Refuse`, **replicas with a `system_identifier` not matching the cluster's reference sysid are excluded from §1 gate input** — their replication evidence is treated as not endorsing any candidate, and they do not contribute to `observed` in the `PrimaryQuorumUnsatisfied` derivation (§4). Exclusion happens **before** `build_replica_following_map`, so excluded replicas never appear as followers in the map.
 
@@ -144,7 +144,7 @@ v1 finding categories:
 
 **Derivation rule for `PrimaryQuorumUnsatisfied`:**
 
-1. Parse `synchronous_standby_names` on the primary into `{ method, count, members }` (e.g. `ANY 1 (A, B)` → method=ANY, count=1, members={A, B}). Treat unparseable as method=ANY, count=∞ (defensive: emit no finding rather than a wrong one).
+1. Parse `synchronous_standby_names` on the primary into `{ method, count, members }` (e.g. `ANY 1 (A, B)` -> method=ANY, count=1, members={A, B}). Treat unparseable as method=ANY, count=∞ (defensive: emit no finding rather than a wrong one).
 2. Build the set of replicas that **bidirectionally-gate-pass** for this primary (full §1 gate, both sides), excluding replicas filtered by §2 (foreign sysid).
 3. `observed = |members ∩ gated_followers|`.
 4. Emit if `observed < count`.
@@ -165,7 +165,7 @@ Operator-facing output (`reason.short`) must surface enough information for inci
 
 Phrasing is implementation detail; the *minimum information content* listed above is spec.
 
-**Action-text ownership.** The writer (`format_reason`) derives the short string from `SplitBrainInfo.resolution` and `SplitBrainInfo.findings` — no new fields on the resolver types are required. The variant→action mapping is:
+**Action-text ownership.** The writer (`format_reason`) derives the short string from `SplitBrainInfo.resolution` and `SplitBrainInfo.findings` — no new fields on the resolver types are required. The variant->action mapping is:
 
 | Resolution | Short-string template |
 |---|---|
@@ -184,7 +184,7 @@ Findings concatenation:
 
 Additions to `HEALTH_CHECK_PRIMARY_QUERY`:
 
-- `system_identifier` from `pg_control_system()`, cast to text: `(SELECT system_identifier::text FROM pg_control_system())` to avoid `bigint`→JSON safe-int issues.
+- `system_identifier` from `pg_control_system()`, cast to text: `(SELECT system_identifier::text FROM pg_control_system())` to avoid `bigint`->JSON safe-int issues.
 - Timeline-history file contents for the current TL:
 
   ```sql
@@ -238,7 +238,7 @@ Future enhancement: re-scan after ≥ `wal_sender_timeout`. If primary set, time
 
 **Correct remediation direction: keep the lower TL, discard/rebuild the higher TL.** The higher-TL primary was isolated (no acker) and, by the cluster's quorum-sync invariant, committed nothing on its fork — it is the empty branch. The lower-TL primary holds the acknowledged writes. So the node to rebuild is the *higher-TL primary*, and the divergent replica re-points onto the *lower-TL* true primary. The original "rebuild `<replica>` from `<true-primary>`" inverts this whenever the resolver names the higher-TL node as `true_primary`.
 
-**It requires a verdict-flip, not just a finding.** The dangerous case (matrix row C-g) is when the lower-TL primary's acker has wandered off, so at scan time no replica is live-following anyone and the resolver falls through to `HigherTimeline` → picks the higher TL → demoting it destroys the acked writes. The finding must drive the verdict toward lower-TL-canonical (or, failing that, force `Refuse`), not ride along as a footnote on a `HigherTimeline` pick.
+**It requires a verdict-flip, not just a finding.** The dangerous case (matrix row C-g) is when the lower-TL primary's acker has wandered off, so at scan time no replica is live-following anyone and the resolver falls through to `HigherTimeline` -> picks the higher TL -> demoting it destroys the acked writes. The finding must drive the verdict toward lower-TL-canonical (or, failing that, force `Refuse`), not ride along as a footnote on a `HigherTimeline` pick.
 
 **The 3-node proof — and why `Refuse` hinges on observability.** In the split-brain scope there are exactly two candidate primaries and one replica (db003). db002's quorum can be satisfied *only* by db003 (a peer primary is not its standby; a primary is not its own). So "is db002's fork empty of acked writes?" reduces to "is db003 acking db002?" — and a replica is on one timeline at a time. Therefore:
 - When db003's allegiance is **observable** (e.g. C-c: streaming db001 on TL=N), we can *prove* db002's fork is empty and give a **confident** "keep db001, fence db002" verdict — no Refuse.

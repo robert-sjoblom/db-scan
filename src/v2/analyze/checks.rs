@@ -109,12 +109,12 @@ pub(super) fn check_writes_blocked(primary: &AnalyzedNode, verdict: &mut Verdict
     };
 
     if is_sync_commit_off(health) || is_standby_names_empty(health) {
-        return; // sync replication effectively disabled → unprotected, not blocked
+        return; // sync replication effectively disabled -> unprotected, not blocked
     }
 
     // When standby_names is populated but no replica is in quorum (whether
     // via empty replication list or all non-quorum sync_state), postgres
-    // waits forever for an ack that won't come → writes block.
+    // waits forever for an ack that won't come -> writes block.
     if find_non_quorum_replicas(primary).len() == health.replication.len() {
         verdict.cluster_verdict = Some(ClusterVerdict::WritesBlocked);
     }
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn check_lag_silent_below_threshold() {
-        // No lag in fixture → sent_lsn == replay_lsn → 0 bytes < threshold.
+        // No lag in fixture -> sent_lsn == replay_lsn -> 0 bytes < threshold.
         let primary = primary_node(make_primary_health(2, None));
         let r1 = streaming_replica(2, "dev-pg-app001-db002.sto2.example.com");
         let r2 = streaming_replica(3, "dev-pg-app001-db003.sto3.example.com");

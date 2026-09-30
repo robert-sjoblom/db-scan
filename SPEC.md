@@ -247,8 +247,8 @@ Events are:
 ### 4.4 Role Detection
 
 - **Method**: `SELECT pg_is_in_recovery()`
-- **Primary**: Not in recovery → execute primary health check
-- **Replica**: In recovery → execute replica health check
+- **Primary**: Not in recovery -> execute primary health check
+- **Replica**: In recovery -> execute replica health check
 
 ### 4.5 Health Check Queries
 
@@ -272,8 +272,8 @@ When a node is unreachable but the primary is accessible:
 
 - **Query primary's pg_stat_replication** to determine replica state
 - **Distinguish failure modes**:
-  - "Unreachable but streaming per primary" → likely network issue from db-scan's perspective
-  - "Unreachable and not in pg_stat_replication" → actual replica failure
+  - "Unreachable but streaming per primary" -> likely network issue from db-scan's perspective
+  - "Unreachable and not in pg_stat_replication" -> actual replica failure
 - **Display both observations**: Show db-scan's direct result alongside primary's reported state
 
 ---
@@ -356,7 +356,7 @@ enum ClusterHealth {
 
 When multiple degraded conditions exist simultaneously:
 
-- **Two or more Degraded reasons** → Escalate to **Critical**
+- **Two or more Degraded reasons** -> Escalate to **Critical**
 - **Rationale**: Compound failures represent higher risk than single issues
 - **Example**: OneReplicaDown + HighReplicationLag on remaining replica = Critical
 
@@ -395,8 +395,8 @@ Multiple nodes return `pg_is_in_recovery() = false`
 
 ### 7.2 Resolution Strategies
 
-1. **HigherTimeline**: Different timeline IDs → higher timeline is true primary
-2. **ReplicaFollowing**: Equal timelines → determine which primary replicas are streaming from
+1. **HigherTimeline**: Different timeline IDs -> higher timeline is true primary
+2. **ReplicaFollowing**: Equal timelines -> determine which primary replicas are streaming from
 3. **Both**: Timeline and replica evidence agree (high confidence)
 4. **ReplicaOverridesTimeline**: Replicas follow lower-timeline primary
 5. **Indeterminate**: Cannot determine (equal timelines, no replica evidence)
@@ -482,7 +482,7 @@ db-scan --watch 30s
 **Transition Visualization**:
 - **Changed clusters highlighted**: Visual distinction for clusters that changed state since last scan
 - **Event log**: Chronological log of state transitions alongside current state table
-  - Format: `[14:32:15] prod-pg-app007: Healthy → Degraded (OneReplicaDown)`
+  - Format: `[14:32:15] prod-pg-app007: Healthy -> Degraded (OneReplicaDown)`
 
 ### 9.3 Service Mode
 
@@ -706,8 +706,8 @@ overrides:
 
 | Source | Failure Behavior | Escalation |
 |--------|------------------|------------|
-| Database Portal | Use cached nodes, mark Degraded | After 1h: WARN → ERROR log level |
-| Prometheus | Use cached/static thresholds | After 5m: WARN → ERROR log level |
+| Database Portal | Use cached nodes, mark Degraded | After 1h: WARN -> ERROR log level |
+| Prometheus | Use cached/static thresholds | After 5m: WARN -> ERROR log level |
 | Plugin | Skip plugin output, log warning | N/A |
 
 ### 14.4 Service Health Degradation

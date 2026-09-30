@@ -24,7 +24,7 @@ We want to optionally persist the full pipeline state of each db-scan run to an 
 A new stage, `capture`, sits between `analyze` and `write`:
 
 ```
-DatabasePortal → Scan → Cluster → Analyze → Capture → Write
+DatabasePortal -> Scan -> Cluster -> Analyze -> Capture -> Write
 ```
 
 `capture` is a passthrough with a side effect:

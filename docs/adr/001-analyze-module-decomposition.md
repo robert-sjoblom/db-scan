@@ -68,7 +68,7 @@ struct Verdict {
 **Location:** `Verdict` lives on `AnalyzedCluster` so it flows through the pipeline and is accessible to writer.
 
 **Flow:**
-1. `analyze()` runs checks → returns `AnalyzedCluster` with `Verdict` populated
+1. `analyze()` runs checks -> returns `AnalyzedCluster` with `Verdict` populated
 2. `classify(analyzed) -> ClusterHealth` maps the verdict to `ClusterHealth` with appropriate `Reason`
 3. Writer accesses `cluster.verdict` for display details instead of re-implementing domain logic
 

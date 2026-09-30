@@ -128,7 +128,7 @@ impl ReplicasView {
                 pairs
                     .iter()
                     .map(|(replica, primary)| {
-                        format!("{}→{}", replica.render(mode), primary.render(mode))
+                        format!("{}->{}", replica.render(mode), primary.render(mode))
                     })
                     .collect::<Vec<_>>()
                     .join(",")
