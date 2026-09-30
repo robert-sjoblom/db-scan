@@ -274,4 +274,4 @@ Future enhancement: re-scan after ≥ `wal_sender_timeout`. If primary set, time
 - Renaming `ReplicaOverridesTimeline` is a breaking API change for `SplitBrainResolution` consumers; the writer and any external readers must be updated in the same PR.
 - Adding `system_identifier` and timeline-history collection makes `HEALTH_CHECK_PRIMARY_QUERY` modestly larger; deployment must have `pg_read_server_files` granted (already true in production).
 - Existing tests assert on `SplitBrainInfo` literals (six tests in `split_brain.rs`, one in `analyze.rs`); each needs the new `confidence` and `findings` fields. Mechanical but not free.
-- `Indeterminate` is preserved as an evidence-state outcome; no single-pass tiebreaker is added.
+- `Indeterminate` is preserved as an evidence-state outcome; no evidence-based single-pass tiebreaker is added. Under equal timelines the `true_primary`/`stale_primaries` split falls back to node-name order so the PRIMARY column is stable across runs on identical state. That order is a label, not a pick, and the short string still reads `cannot determine true primary`.

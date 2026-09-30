@@ -213,8 +213,12 @@ fn extract_timeline_info<'a>(primaries: &[&'a AnalyzedNode]) -> TimelineInfo<'a>
         .filter_map(|p| get_timeline(p).map(|tl| (*p, tl)))
         .collect();
 
-    // Sort by timeline descending (highest first)
-    primary_timelines.sort_by_key(|b| std::cmp::Reverse(b.1));
+    // Highest timeline first; ties by node name so the equal-timeline pick is stable
+    // across runs (ADR-002, Consequences).
+    primary_timelines.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.node_name.cmp(&b.0.node_name))
+    });
 
     let highest_timeline = primary_timelines[0].1;
     let highest_timeline_node = primary_timelines[0].0;
@@ -1209,6 +1213,20 @@ mod tests {
                 replicas_following_true: vec!["db004".to_owned()],
             }
         );
+    }
+
+    #[test]
+    fn equal_timelines_pick_is_stable_across_input_order() {
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary(2, "db002", IP_DB2, 11);
+        let replicas: Vec<&AnalyzedNode> = vec![];
+
+        let forward = resolve_split_brain(&[&db1, &db2], &replicas);
+        let reversed = resolve_split_brain(&[&db2, &db1], &replicas);
+
+        assert_eq!(forward.true_primary, "db001");
+        assert_eq!(reversed.true_primary, "db001");
+        assert_eq!(reversed.stale_primaries, vec!["db002".to_owned()]);
     }
 
     #[test]
