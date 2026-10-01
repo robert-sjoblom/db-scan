@@ -158,7 +158,6 @@ pub(crate) struct CliArgs {
 }
 
 #[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
 struct FileConfig {
     #[serde(default)]
     postgres: PostgresFile,
@@ -177,14 +176,18 @@ struct FileConfig {
 }
 
 #[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct CaptureFile {
+    /// Lets the block stay in the file while capture is switched off.
+    #[serde(default = "enabled_by_default")]
     pub(crate) enabled: bool,
     pub(crate) postgres: PostgresCapture,
 }
 
+fn enabled_by_default() -> bool {
+    true
+}
+
 #[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct PostgresCapture {
     pub(crate) host: String,
     pub(crate) port: u16,
@@ -193,13 +196,11 @@ pub(crate) struct PostgresCapture {
 }
 
 #[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
 struct DatabasePortalFile {
     url: Option<String>,
 }
 
 #[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
 struct PostgresFile {
     user: Option<String>,
     sslkey: Option<PathBuf>,
@@ -208,27 +209,23 @@ struct PostgresFile {
 }
 
 #[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
 struct DefaultsFile {
     user: Option<String>,
     password: Option<String>,
 }
 
 #[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
 struct SshFile {
     user: Option<String>,
 }
 
 #[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
 struct DisplayFile {
     log_level: Option<String>,
     no_color: Option<bool>,
 }
 
 #[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
 struct ScanFile {
     max_concurrency: Option<usize>,
 }
@@ -256,12 +253,46 @@ fn load_file(explicit: Option<&PathBuf>, no_config: bool) -> anyhow::Result<File
         },
     };
     match fs::read_to_string(&path) {
-        Ok(s) => serde_yaml::from_str(&s)
-            .with_context(|| format!("parsing config file {}", path.display())),
+        Ok(s) => parse_file(&s, |key| {
+            eprintln!(
+                "warning: config file {}: unknown field `{key}` ignored",
+                path.display()
+            );
+        })
+        .with_context(|| format!("parsing config file {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => {
             Ok(FileConfig::default())
         }
         Err(e) => Err(e).with_context(|| format!("reading config file {}", path.display())),
+    }
+}
+
+/// Parse the YAML config. Keys the schema does not know are reported to
+/// `on_unknown` as dotted paths (`scan.new_knob`) and otherwise ignored, so a
+/// config written for another release still loads.
+fn parse_file(
+    yaml: &str,
+    mut on_unknown: impl FnMut(String),
+) -> Result<FileConfig, serde_yaml::Error> {
+    let de = serde_yaml::Deserializer::from_str(yaml);
+    serde_ignored::deserialize(de, |path| on_unknown(key_path(&path)))
+}
+
+/// Render an ignored key as the operator wrote it, `capture.extra`, skipping
+/// the `Option` and newtype layers `serde_ignored` would otherwise show as `?`.
+fn key_path(path: &serde_ignored::Path<'_>) -> String {
+    use serde_ignored::Path;
+
+    match path {
+        Path::Root => String::new(),
+        Path::Seq { parent, index } => format!("{}[{index}]", key_path(parent)),
+        Path::Map { parent, key } => match key_path(parent) {
+            parent if parent.is_empty() => key.clone(),
+            parent => format!("{parent}.{key}"),
+        },
+        Path::Some { parent }
+        | Path::NewtypeStruct { parent }
+        | Path::NewtypeVariant { parent } => key_path(parent),
     }
 }
 
@@ -336,4 +367,127 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
     };
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(yaml: &str) -> (FileConfig, Vec<String>) {
+        let mut unknown = Vec::new();
+        let file = parse_file(yaml, |path| unknown.push(path)).expect("config parses");
+        (file, unknown)
+    }
+
+    #[test]
+    fn unknown_top_level_key_is_reported_and_ignored() {
+        let (file, unknown) = parse("future_section: {a: 1}\nscan: {max_concurrency: 4}\n");
+
+        assert_eq!(unknown, ["future_section"]);
+        assert_eq!(file.scan.max_concurrency, Some(4));
+    }
+
+    #[test]
+    fn unknown_nested_key_is_reported_with_its_section() {
+        let (file, unknown) = parse("scan: {max_concurrency: 4, new_knob: 2}\n");
+
+        assert_eq!(unknown, ["scan.new_knob"]);
+        assert_eq!(file.scan.max_concurrency, Some(4));
+    }
+
+    #[test]
+    fn known_keys_are_not_reported() {
+        let (file, unknown) = parse(
+            "postgres: {user: u, sslkey: /k, sslcert: /c, sslrootcert: /r}
+defaults: {user: d, password: p}
+ssh: {user: s}
+display: {log_level: info, no_color: true}
+scan: {max_concurrency: 4}
+database_portal: {url: http://x}
+",
+        );
+
+        assert!(unknown.is_empty(), "reported {unknown:?}");
+        assert_eq!(file.postgres.user.as_deref(), Some("u"));
+        assert_eq!(file.display.no_color, Some(true));
+        assert_eq!(file.database_portal.url.as_deref(), Some("http://x"));
+    }
+
+    #[test]
+    fn unknown_key_inside_optional_section_keeps_a_plain_path() {
+        let (_, unknown) = parse(
+            "capture: {enabled: false, postgres: {host: h, port: 1, dbname: d, user: u}, extra: 1}\n",
+        );
+
+        assert_eq!(unknown, ["capture.extra"]);
+    }
+
+    #[test]
+    fn capture_block_without_enabled_key_is_on() {
+        let (file, unknown) =
+            parse("capture: {postgres: {host: h, port: 1, dbname: d, user: u}}\n");
+
+        assert!(file.capture.expect("capture block parsed").enabled);
+        assert!(unknown.is_empty(), "reported {unknown:?}");
+    }
+
+    #[test]
+    fn enabled_false_keeps_the_block_and_turns_capture_off() {
+        let (file, unknown) =
+            parse("capture: {enabled: false, postgres: {host: h, port: 1, dbname: d, user: u}}\n");
+
+        assert!(!file.capture.expect("capture block parsed").enabled);
+        assert!(unknown.is_empty(), "reported {unknown:?}");
+    }
+
+    #[test]
+    fn capture_block_absent_turns_capture_off() {
+        let (file, _) = parse("scan: {max_concurrency: 4}\n");
+
+        assert!(file.capture.is_none());
+    }
+
+    #[test]
+    fn capture_block_without_postgres_is_an_error() {
+        let err = parse_file("capture: {}\n", |_| {}).expect_err("postgres is required");
+
+        assert!(err.to_string().contains("postgres"), "{err}");
+    }
+
+    #[test]
+    fn capture_cfg_is_none_when_the_block_is_disabled() {
+        let config = DbScanConfig {
+            print_config: false,
+            pguser: "u".into(),
+            pgpassword: Secret::new("pw".into()),
+            pgsslkey: PathBuf::from("/k"),
+            pgsslcert: PathBuf::from("/c"),
+            pgsslrootcert: PathBuf::from("/r"),
+            cluster: None,
+            log_level: EnvFilter::new("info"),
+            show_healthy: false,
+            show_failover: false,
+            silence_tracing: false,
+            default_user: "d".into(),
+            default_pass: "p".into(),
+            csv: None,
+            no_color: false,
+            watch: None,
+            ssh_user: None,
+            check_disks: false,
+            max_concurrency: 1,
+            database_portal_url: "http://x".into(),
+            capture: Some(CaptureFile {
+                enabled: false,
+                postgres: PostgresCapture {
+                    host: "h".into(),
+                    port: 1,
+                    dbname: "d".into(),
+                    user: "u".into(),
+                },
+            }),
+        };
+
+        assert!(config.capture_cfg().is_none());
+    }
 }

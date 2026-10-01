@@ -97,7 +97,7 @@ capture:
     # certs and password inherited from top-level postgres: block
 ```
 
-When the block is absent or `enabled: false`, the capture client is `None` in `PipelineContext` and the stage forwards without buffering.
+When the block is absent or `enabled: false`, the capture client is `None` in `PipelineContext` and the stage forwards without buffering. `enabled` defaults to true when omitted (since 2026-10-01), so the block's presence is enough to opt in and the key exists to switch a configured destination off without deleting it.
 
 `--no-capture` overrides config-enabled capture for a single run.
 
