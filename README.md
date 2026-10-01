@@ -140,7 +140,7 @@ capture:
     user: capture_writer
 ```
 
-All fields are optional. CLI flags and environment variables take precedence over the config file. `PGPASSWORD` is never read from the config file.
+All fields are optional. CLI flags and environment variables take precedence over the config file. `PGPASSWORD` is never read from the config file. Keys db-scan does not recognise are reported on stderr and ignored, so a config written for another release still loads.
 
 ### Environment Variables
 
@@ -310,7 +310,7 @@ capture:
     user: capture_writer
 ```
 
-SSL certs are inherited from the top-level `postgres:` block; the password is taken from `PGPASSWORD`. When the block is absent or `enabled: false`, capture is off and the pipeline stage degrades to pure forwarding.
+SSL certs are inherited from the top-level `postgres:` block; the password is taken from `PGPASSWORD`. `enabled` defaults to true when omitted; set it to false to keep the block in place without capturing. When the block is absent or `enabled: false`, capture is off and the pipeline stage degrades to pure forwarding.
 
 ### Destination schema (operator-owned)
 
