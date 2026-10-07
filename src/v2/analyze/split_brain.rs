@@ -13,12 +13,19 @@ use crate::v2::{
 const WEAKENED_SYNCHRONOUS_COMMIT: [&str; 4] = ["local", "off", "remote_write", ""];
 
 /// How split-brain was resolved.
+///
+/// On the variants that carry two timelines, `fork_lsn` is where the lower timeline
+/// ended and the higher one forked off, read from the higher-TL primary's timeline
+/// history. It is None when that history has no entry for the lower timeline, which
+/// means the higher timeline forked from an ancestor rather than from the lower
+/// timeline itself.
 #[derive(Debug, Eq, PartialEq, Clone, Serialize)]
 pub enum SplitBrainResolution {
     /// Higher timeline indicates the true primary (most recent promotion).
     HigherTimeline {
         true_primary_timeline: i32,
         stale_timeline: i32,
+        fork_lsn: Option<String>,
     },
     /// Replicas are streaming from the true primary.
     ReplicaFollowing {
@@ -29,6 +36,7 @@ pub enum SplitBrainResolution {
         true_primary_timeline: i32,
         stale_timeline: i32,
         replicas_following_true: Vec<NodeName>,
+        fork_lsn: Option<String>,
     },
     /// A live replica is flushing for the lower-timeline primary, which therefore has
     /// quorum; the higher-timeline primary was isolated after its promotion.
@@ -36,6 +44,7 @@ pub enum SplitBrainResolution {
         true_primary_timeline: i32,
         stale_timeline: i32,
         replicas_following_true: Vec<NodeName>,
+        fork_lsn: Option<String>,
     },
     /// Cannot determine true primary - timelines equal, no replica evidence.
     Indeterminate,
@@ -456,6 +465,15 @@ fn resolve_with_different_timelines(
     let stale_tl = timeline_info.primaries_with_lower_timeline[0].1;
     let highest_tl_node = timeline_info.highest_timeline_node;
     let highest_tl = timeline_info.highest_timeline;
+    // On this topology the two primaries are always TL N and N+1 with N+1 forked
+    // directly from N, so this is Some whenever the timelines differ. A None would
+    // need three concurrent primaries on three timelines; a failed history read
+    // never reaches the resolver (the node becomes UnknownPrimary). Read a None
+    // in a capture as a history that failed to parse before anything else.
+    let fork_lsn = highest_tl_node
+        .role
+        .as_primary()
+        .and_then(|h| h.fork_lsn_for(stale_tl));
 
     let replicas_following_highest = replicas_following
         .get(&highest_tl_node.node_name)
@@ -488,6 +506,7 @@ fn resolve_with_different_timelines(
                 true_primary_timeline: stale_tl,
                 stale_timeline: highest_tl,
                 replicas_following_true: replicas_following_stale,
+                fork_lsn,
             },
             confidence: Confidence::BestEffort,
             findings: vec![],
@@ -507,6 +526,7 @@ fn resolve_with_different_timelines(
                 true_primary_timeline: highest_tl,
                 stale_timeline: stale_tl,
                 replicas_following_true: replicas_following_highest,
+                fork_lsn,
             },
             confidence: Confidence::BestEffort,
             findings: vec![],
@@ -525,6 +545,7 @@ fn resolve_with_different_timelines(
             resolution: SplitBrainResolution::HigherTimeline {
                 true_primary_timeline: highest_tl,
                 stale_timeline: stale_tl,
+                fork_lsn,
             },
             confidence: Confidence::BestEffort,
             findings: vec![],
@@ -1062,6 +1083,7 @@ mod tests {
                 resolution: SplitBrainResolution::HigherTimeline {
                     true_primary_timeline: 12,
                     stale_timeline: 11,
+                    fork_lsn: None,
                 },
                 // Neither primary has a live follower, so both report quorum
                 // unsatisfied. The elected primary's finding is what makes this
@@ -1085,6 +1107,63 @@ mod tests {
     }
 
     #[test]
+    fn fork_lsn_is_read_from_the_higher_timeline_history() {
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary_with_health(
+            2,
+            "db002",
+            IP_DB2,
+            PrimaryHealthBuilder::new()
+                .with_timeline(12)
+                .with_synchronous_standby_names(&fleet_ssn("db002"))
+                .with_timeline_history(
+                    "10\t0/3000000\tno recovery target specified\n\
+                     11\t0/5000000\tno recovery target specified\n",
+                )
+                .build(),
+        );
+
+        let info = resolve_split_brain(&[&db1, &db2], &[]);
+
+        assert_eq!(
+            info.resolution,
+            SplitBrainResolution::HigherTimeline {
+                true_primary_timeline: 12,
+                stale_timeline: 11,
+                fork_lsn: Some("0/5000000".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn fork_lsn_is_none_when_the_higher_timeline_forked_from_an_ancestor() {
+        // db002's lineage is 10 -> 12: it never ran on TL 11, so its history has no
+        // switch point for db001's timeline.
+        let db1 = primary(1, "db001", IP_DB1, 11);
+        let db2 = primary_with_health(
+            2,
+            "db002",
+            IP_DB2,
+            PrimaryHealthBuilder::new()
+                .with_timeline(12)
+                .with_synchronous_standby_names(&fleet_ssn("db002"))
+                .with_timeline_history("10\t0/3000000\tno recovery target specified\n")
+                .build(),
+        );
+
+        let info = resolve_split_brain(&[&db1, &db2], &[]);
+
+        assert_eq!(
+            info.resolution,
+            SplitBrainResolution::HigherTimeline {
+                true_primary_timeline: 12,
+                stale_timeline: 11,
+                fork_lsn: None,
+            }
+        );
+    }
+
+    #[test]
     fn timeline_and_replica_evidence_agree() {
         let db1 = primary(1, "db001", IP_DB1, 11);
         let db2 = primary_with_followers(2, "db002", IP_DB2, 12, &["db003"]);
@@ -1103,6 +1182,7 @@ mod tests {
                     true_primary_timeline: 12,
                     stale_timeline: 11,
                     replicas_following_true: vec!["db003".to_owned()],
+                    fork_lsn: None,
                 },
                 confidence: Confidence::BestEffort,
                 findings: vec![
@@ -1141,6 +1221,7 @@ mod tests {
                     true_primary_timeline: 11,
                     stale_timeline: 12,
                     replicas_following_true: vec!["db003".to_owned()],
+                    fork_lsn: None,
                 },
                 confidence: Confidence::BestEffort,
                 findings: vec![

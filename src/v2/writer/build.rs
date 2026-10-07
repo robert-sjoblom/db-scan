@@ -718,6 +718,7 @@ fn format_resolution(info: &SplitBrainInfo) -> String {
         SplitBrainResolution::HigherTimeline {
             true_primary_timeline,
             stale_timeline,
+            ..
         } => format!(
             "SplitBrain: keep {true_primary} (TL={true_primary_timeline}, {true_quorum}), \
              demote {stale} (TL={stale_timeline}, {stale_quorum}); no live replicas"
@@ -776,6 +777,7 @@ mod tests {
                 true_primary_timeline: 11,
                 stale_timeline: 12,
                 replicas_following_true: vec!["db003".to_owned()],
+                fork_lsn: None,
             },
             confidence: Confidence::BestEffort,
             findings: vec![SplitBrainFinding::PrimaryQuorumUnsatisfied {
@@ -799,6 +801,7 @@ mod tests {
             resolution: SplitBrainResolution::HigherTimeline {
                 true_primary_timeline: 12,
                 stale_timeline: 11,
+                fork_lsn: None,
             },
             confidence: Confidence::Refuse,
             findings: vec![SplitBrainFinding::SystemIdentifierMismatch {
@@ -825,6 +828,7 @@ mod tests {
             resolution: SplitBrainResolution::HigherTimeline {
                 true_primary_timeline: 12,
                 stale_timeline: 11,
+                fork_lsn: None,
             },
             confidence: Confidence::Refuse,
             findings: vec![SplitBrainFinding::SyncQuorumDisabled {
@@ -864,6 +868,29 @@ mod tests {
     }
 
     #[test]
+    fn fork_lsn_appears_in_details_json() {
+        let info = SplitBrainInfo {
+            true_primary: "db001".to_owned(),
+            stale_primaries: vec!["db002".to_owned()],
+            resolution: SplitBrainResolution::LowerTimelineHasQuorum {
+                true_primary_timeline: 10,
+                stale_timeline: 11,
+                replicas_following_true: vec!["db003".to_owned()],
+                fork_lsn: Some("747/A2FFFC18".to_owned()),
+            },
+            confidence: Confidence::BestEffort,
+            findings: vec![],
+        };
+
+        let (_, details) = split_brain_reason(&info);
+
+        assert!(
+            details.contains(r#""fork_lsn":"747/A2FFFC18""#),
+            "details were: {details}"
+        );
+    }
+
+    #[test]
     fn resolution_text_uses_display_names_not_fqdns() {
         let info = SplitBrainInfo {
             true_primary: "dev-pg-app003-db002.sto3.example.com".to_owned(),
@@ -872,6 +899,7 @@ mod tests {
                 true_primary_timeline: 11,
                 stale_timeline: 10,
                 replicas_following_true: vec!["dev-pg-app003-db003.sto1.example.com".to_owned()],
+                fork_lsn: None,
             },
             confidence: Confidence::BestEffort,
             findings: vec![SplitBrainFinding::PrimaryQuorumUnsatisfied {
@@ -897,6 +925,7 @@ mod tests {
                 true_primary_timeline: 11,
                 stale_timeline: 10,
                 replicas_following_true: vec!["db003".to_owned()],
+                fork_lsn: None,
             },
             confidence: Confidence::BestEffort,
             findings: vec![SplitBrainFinding::PrimaryQuorumUnsatisfied {
@@ -924,6 +953,7 @@ mod tests {
             resolution: SplitBrainResolution::HigherTimeline {
                 true_primary_timeline: 11,
                 stale_timeline: 10,
+                fork_lsn: None,
             },
             confidence: Confidence::Conflicting,
             findings: vec![
@@ -959,6 +989,7 @@ mod tests {
                 true_primary_timeline: 11,
                 stale_timeline: 10,
                 replicas_following_true: vec!["db003".to_owned()],
+                fork_lsn: None,
             },
             confidence: Confidence::Conflicting,
             findings: vec![SplitBrainFinding::PrimaryQuorumUnsatisfied {

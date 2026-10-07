@@ -236,6 +236,9 @@ redundant_else = { level = "allow", priority = 127 }
 # so we don't inline anything
 uninlined_format_args = { level = "allow", priority = 127 }
 
+# Noisy when we mostly assert that the Vec is empty
+assert_is_empty =  { level = "allow", priority = 127 }
+
 [dependencies]
 anyhow = "1.0.100"
 openssh = { version = "0.11", features = ["native-mux"] }

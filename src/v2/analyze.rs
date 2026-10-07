@@ -1361,6 +1361,7 @@ mod cluster_state_tests {
                     replicas_following_true: vec![
                         "dev-pg-app002-db003.sto3.example.com".to_owned(),
                     ],
+                    fork_lsn: Some("747/A2FFFC18".to_owned()),
                 },
                 confidence: Confidence::BestEffort,
                 findings: vec![
@@ -1426,6 +1427,7 @@ mod cluster_state_tests {
                     replicas_following_true: vec![
                         "dev-pg-app003-db003.sto1.example.com".to_owned(),
                     ],
+                    fork_lsn: Some("5C0/8E0000A0".to_owned()),
                 },
                 confidence: Confidence::BestEffort,
                 findings: vec![
