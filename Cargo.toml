@@ -264,3 +264,4 @@ pretty_assertions = "1.4.1"
 rstest = "0.26.1"
 rvcr = { git = "https://github.com/robert-sjoblom/rvcr", rev = "74e1a3852d147d486a8180aa325f910ab2adfefb" }
 strum = { version = "0.28.0", features = ["derive"] }
+tempfile = "3"
