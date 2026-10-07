@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/robert-sjoblom/db-scan/compare/v0.4.0...v0.4.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **updater:** keep the binary runnable after a sudo self-update ([#70](https://github.com/robert-sjoblom/db-scan/issues/70)) ([8e80bbf](https://github.com/robert-sjoblom/db-scan/commit/8e80bbf0771f7144bf9d6a9e6293c6de9672d755))
+
 ## [0.4.0](https://github.com/robert-sjoblom/db-scan/compare/v0.3.0...v0.4.0) (2026-10-01)
 
 
