@@ -37,6 +37,8 @@ pub(crate) struct DbScanConfig {
     pub(crate) ssh_user: Option<String>,
     pub(crate) check_disks: bool,
     pub(crate) max_concurrency: usize,
+    /// Deadline for a whole node connect: TCP, TLS handshake, startup and auth.
+    pub(crate) connect_timeout: Duration,
     pub(crate) database_portal_url: String,
     pub(crate) capture: Option<CaptureFile>,
 }
@@ -228,7 +230,10 @@ struct DisplayFile {
 #[derive(Deserialize, Default, Debug)]
 struct ScanFile {
     max_concurrency: Option<usize>,
+    connect_timeout_secs: Option<u64>,
 }
+
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 15;
 
 fn parse_cluster_regex(s: &str) -> Result<Regex, regex_lite::Error> {
     Regex::new(s)
@@ -336,6 +341,12 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         .or(file.scan.max_concurrency)
         .unwrap_or(256)
         .max(1);
+    let connect_timeout = Duration::from_secs(
+        file.scan
+            .connect_timeout_secs
+            .unwrap_or(DEFAULT_CONNECT_TIMEOUT_SECS)
+            .max(1),
+    );
     let database_portal_url = file
         .database_portal
         .url
@@ -362,6 +373,7 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         ssh_user,
         check_disks: cli.check_disks,
         max_concurrency,
+        connect_timeout,
         database_portal_url,
         capture,
     };
@@ -402,7 +414,7 @@ mod tests {
 defaults: {user: d, password: p}
 ssh: {user: s}
 display: {log_level: info, no_color: true}
-scan: {max_concurrency: 4}
+scan: {max_concurrency: 4, connect_timeout_secs: 30}
 database_portal: {url: http://x}
 ",
         );
@@ -410,6 +422,7 @@ database_portal: {url: http://x}
         assert!(unknown.is_empty(), "reported {unknown:?}");
         assert_eq!(file.postgres.user.as_deref(), Some("u"));
         assert_eq!(file.display.no_color, Some(true));
+        assert_eq!(file.scan.connect_timeout_secs, Some(30));
         assert_eq!(file.database_portal.url.as_deref(), Some("http://x"));
     }
 
@@ -476,6 +489,7 @@ database_portal: {url: http://x}
             ssh_user: None,
             check_disks: false,
             max_concurrency: 1,
+            connect_timeout: Duration::from_secs(15),
             database_portal_url: "http://x".into(),
             capture: Some(CaptureFile {
                 enabled: false,

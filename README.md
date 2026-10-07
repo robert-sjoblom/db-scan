@@ -128,6 +128,8 @@ display:
 
 scan:
   max_concurrency: 256
+  # Deadline in seconds for each node connect (TCP, TLS, startup and auth).
+  connect_timeout_secs: 15
 
 # Optional: upload each run's pipeline state to an internal postgres for
 # building an analyzer test corpus. Off by default. See "Remote Capture" below.
