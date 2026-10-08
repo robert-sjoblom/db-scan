@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/robert-sjoblom/db-scan/compare/v0.4.1...v0.5.0) (2026-10-08)
+
+
+### Features
+
+* **analyze:** surface the timeline fork LSN in split-brain details ([#72](https://github.com/robert-sjoblom/db-scan/issues/72)) ([c03e70a](https://github.com/robert-sjoblom/db-scan/commit/c03e70a2b941050ba64ede6e848d23e1aebc6118))
+
 ## [0.4.1](https://github.com/robert-sjoblom/db-scan/compare/v0.4.0...v0.4.1) (2026-10-07)
 
 
