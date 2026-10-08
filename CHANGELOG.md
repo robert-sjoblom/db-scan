@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/robert-sjoblom/db-scan/compare/v0.5.0...v0.5.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **release:** publish aarch64-apple-darwin builds ([#74](https://github.com/robert-sjoblom/db-scan/issues/74)) ([59da01f](https://github.com/robert-sjoblom/db-scan/commit/59da01fe0d92296fc9b2d54c7fabe63cf623e2cc))
+
 ## [0.5.0](https://github.com/robert-sjoblom/db-scan/compare/v0.4.1...v0.5.0) (2026-10-08)
 
 
