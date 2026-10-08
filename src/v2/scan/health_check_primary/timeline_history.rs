@@ -38,7 +38,7 @@ impl super::PrimaryHealthCheckResult {
     }
 
     /// LSN at which `from_tli` ended and a new timeline forked off, if recorded.
-    pub fn _fork_lsn_for(&self, from_tli: i32) -> Option<String> {
+    pub fn fork_lsn_for(&self, from_tli: i32) -> Option<String> {
         self.timeline_history_entries()
             .into_iter()
             .find(|e| e.previous_tli == from_tli)
@@ -47,7 +47,6 @@ impl super::PrimaryHealthCheckResult {
 }
 
 #[cfg(test)]
-#[expect(clippy::used_underscore_items, reason = "will be used shortly")]
 mod tests {
     use crate::v2::{
         scan::health_check_primary::PrimaryHealthCheckResult, tests_common::PrimaryHealthBuilder,
@@ -93,9 +92,9 @@ mod tests {
     #[test]
     fn fork_lsn_returns_switch_point() {
         let h = with_history("1\t0/3000000\treason1\n2\t0/5000000\treason2\n");
-        assert_eq!(h._fork_lsn_for(1), Some("0/3000000".to_owned()));
-        assert_eq!(h._fork_lsn_for(2), Some("0/5000000".to_owned()));
-        assert_eq!(h._fork_lsn_for(3), None);
+        assert_eq!(h.fork_lsn_for(1), Some("0/3000000".to_owned()));
+        assert_eq!(h.fork_lsn_for(2), Some("0/5000000".to_owned()));
+        assert_eq!(h.fork_lsn_for(3), None);
     }
 
     #[test]
