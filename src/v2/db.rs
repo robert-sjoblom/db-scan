@@ -12,7 +12,12 @@ use tracing::instrument;
 
 use anyhow::Context as _;
 
-use crate::{CONFIG, config::DbScanConfig, errors, v2::node::Node};
+use crate::{
+    CONFIG,
+    config::{DbScanConfig, get_config},
+    errors,
+    v2::node::Node,
+};
 
 static CONNECTOR: OnceLock<MakeRustlsConnect> = OnceLock::new();
 static INSECURE_CONNECTOR: OnceLock<MakeRustlsConnect> = OnceLock::new();
@@ -25,9 +30,8 @@ pub type PgConnection = Connection<Socket, <MakeRustlsConnect as MakeTlsConnect<
 /// Used by features that need to connect to a Postgres that isn't part of the
 /// scanned node fleet (e.g. capture uploads).
 pub async fn connect_with(cfg: &Config) -> anyhow::Result<(Client, PgConnection)> {
-    cfg.connect(connector().clone())
+    connect_bounded(cfg, connector(), get_config().connect_timeout)
         .await
-        .map_err(errors::pg_err)
         .context("attempting: postgres connect")
 }
 
@@ -40,13 +44,29 @@ pub async fn connect(node: &Node) -> anyhow::Result<(Client, PgConnection)> {
         insecure_connector()
     };
 
-    let (client, conn) = cfg
-        .connect(connector.clone())
+    let (client, conn) = connect_bounded(&cfg, connector, get_config().connect_timeout)
         .await
-        .map_err(errors::pg_err)
         .with_context(|| format!("requires_cert: {}", node.requires_cert()))
         .context("attempting: postgres connect")?;
     Ok((client, conn))
+}
+
+/// Bound the whole connect: TCP, TLS handshake, startup and auth.
+/// `Config::connect_timeout` only bounds the TCP socket connect, so a server
+/// that stalls mid-handshake would otherwise hang until it drops the socket.
+async fn connect_bounded(
+    cfg: &Config,
+    connector: &MakeRustlsConnect,
+    deadline: Duration,
+) -> anyhow::Result<(Client, PgConnection)> {
+    match tokio::time::timeout(deadline, cfg.connect(connector.clone())).await {
+        Ok(res) => res.map_err(errors::pg_err),
+        Err(_) => Err(anyhow::anyhow!(
+            "connect did not complete within {:.1}s (TLS handshake/startup/auth stalled)",
+            deadline.as_secs_f32()
+        )
+        .context(errors::DbErrorKind::ConnectionTimeout)),
+    }
 }
 
 fn pg_cfg(node: &Node) -> Config {
@@ -167,5 +187,39 @@ impl ServerCertVerifier for NoCertVerification {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_bounded_times_out_when_server_stalls_after_accept() {
+        // Accepts TCP but never answers the startup message.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _server = tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let mut cfg = Config::new();
+        cfg.host("127.0.0.1")
+            .port(port)
+            .user("x")
+            .ssl_mode(SslMode::Disable)
+            .connect_timeout(Duration::from_secs(10));
+
+        let started = std::time::Instant::now();
+        let err = connect_bounded(&cfg, insecure_connector(), Duration::from_millis(200))
+            .await
+            .err()
+            .expect("stalled server must not connect");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            errors::extract_kind(&err),
+            errors::DbErrorKind::ConnectionTimeout
+        );
     }
 }
