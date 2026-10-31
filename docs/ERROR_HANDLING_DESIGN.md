@@ -331,6 +331,7 @@ let node = AnalyzedNode::builder()
 | Kind | Cause | Action |
 |------|-------|--------|
 | `ConnectionRefused` | Network issue, DB restarting | Retry with backoff |
+| `ConnectionClosed` | Server hung up mid-handshake/auth or on an open connection | Retry with backoff |
 | `ConnectionTimeout` | Network latency, DB overloaded | Retry with backoff |
 | `QueryTimeout` | Long-running query, DB busy | Retry once |
 
