@@ -47,7 +47,7 @@ The `hostname` column carries the **cluster name**, not the machine running db-s
 
 ### 3. Flush mechanics
 
-The capture client is an `Arc<tokio_postgres::Client>` connected once at startup and held in `PipelineContext` for the process lifetime.
+The capture client is an `Arc<tokio_postgres::Client>` connected at the start of each scan and held in `PipelineContext` for that scan.
 
 The flush is **inline-awaited** with a 5 s timeout:
 
@@ -113,12 +113,11 @@ No envelope struct (`Capture { metadata, analyzed: Vec<...> }`) -- the metadata 
 
 ### 8. Watch mode
 
-The capture client is owned by `PipelineContext` and lives for the process lifetime. Each pipeline cycle gets a fresh `Arc` clone. There is no reconnect-on-error in v1; if the capture DB restarts mid-watch, subsequent inserts fail and are logged. Acceptable for v1 -- db-scan processes are typically short-lived enough that this is rare.
+Each watch cycle runs a fresh scan, and each scan opens its own capture connection. A capture DB restart or failover loses at most the batch of the scan in flight; the next cycle reconnects.
 
 ## Out of scope
 
 - **Retry / on-disk queue.** Dropped during design. The corpus tolerates loss; an on-disk queue adds operational surface area (disk pressure, schema migration, cleanup) for a corpus that doesn't need it.
-- **Reconnect-on-error.** If the v1 single-`Client` pattern proves fragile under long watch runs, revisit.
 - **Sanitization.** Sanitize at fixture extraction if/when fixtures are committed publicly.
 - **Multi-sink transport.** Postgres only.
 - **Capturing `args`.** Risk of `--pgpassword <secret>` leakage. Flag-relevant context can be inferred from the data shape (e.g., presence of disk-check data).
