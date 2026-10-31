@@ -136,7 +136,9 @@ scan:
 capture:
   enabled: false
   postgres:
-    host: capture.example.com
+    hosts:
+      - capture-db001.example.com
+      - capture-db002.example.com
     port: 5432
     dbname: db_scan_captures
     user: capture_writer
@@ -308,13 +310,17 @@ Add a `capture:` block to the config:
 capture:
   enabled: true
   postgres:
-    host: capture.example.com
+    hosts:
+      - capture-db001.example.com
+      - capture-db002.example.com
     port: 5432
     dbname: db_scan_captures
     user: capture_writer
 ```
 
 SSL certs are inherited from the top-level `postgres:` block; the password is taken from `PGPASSWORD`. `enabled` defaults to true when omitted; set it to false to keep the block in place without capturing. When the block is absent or `enabled: false`, capture is off and the pipeline stage degrades to pure forwarding.
+
+List every node of the capture cluster under `hosts`. At the start of each scan db-scan tries them in order and writes to the first one that accepts writes, so after a failover the next run finds the new primary. All hosts share `port`, `dbname` and `user`. A single `host` key still works; when both are set, `host` is tried first.
 
 ### Destination schema (operator-owned)
 
@@ -341,7 +347,7 @@ CREATE TABLE db_scan.db_scan_captures (
 
 ### Failure mode
 
-Capture is best-effort. Failure to connect at startup, insert errors, and timeouts (5 s) are logged and ignored — the diagnostic itself is never gated on capture health.
+Capture is best-effort. Finding no writable host, insert errors, and timeouts (5 s per host when connecting, 5 s for the insert) are logged and ignored — the diagnostic itself is never gated on capture health.
 
 ## Development
 
