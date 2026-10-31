@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/robert-sjoblom/db-scan/compare/v0.5.1...v0.6.0) (2026-10-31)
+
+
+### Features
+
+* **config:** read dev cert clusters from postgres.cert_clusters ([#76](https://github.com/robert-sjoblom/db-scan/issues/76)) ([719c996](https://github.com/robert-sjoblom/db-scan/commit/719c996b6602cdcfc6aeb80faf9dfd0dde78b54a))
+
 ## [0.5.1](https://github.com/robert-sjoblom/db-scan/compare/v0.5.0...v0.5.1) (2026-10-08)
 
 
