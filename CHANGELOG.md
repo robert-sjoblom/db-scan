@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/robert-sjoblom/db-scan/compare/v0.7.0...v0.7.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **capture:** try a list of hosts and write to primary ([#80](https://github.com/robert-sjoblom/db-scan/issues/80)) ([9e1fb1c](https://github.com/robert-sjoblom/db-scan/commit/9e1fb1c7601a7b1c83528622036ffb0a7aa5c76d))
+
 ## [0.7.0](https://github.com/robert-sjoblom/db-scan/compare/v0.6.0...v0.7.0) (2026-10-31)
 
 
