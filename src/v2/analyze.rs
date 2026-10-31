@@ -5,6 +5,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::instrument;
 
 use crate::{
+    errors::DbErrorKind,
     pipeline::PipelineContext,
     v2::{
         analyze::{
@@ -250,7 +251,9 @@ pub enum NodeVerdict {
     SyncCommitOff,
     /// Node is reachable in inventory but unreachable for health checks
     /// `(Role::Unknown)`. One or more of these -> cluster has reduced redundancy.
-    Unreachable,
+    Unreachable {
+        cause: Option<DbErrorKind>,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize)]
@@ -285,14 +288,15 @@ pub async fn analyze_clusters(
     analyzed_tx: UnboundedSender<ClusterHealth>,
 ) {
     while let Some(cluster) = cluster_rx.recv().await {
-        let analyzed_cluster = analyze(cluster);
-        let analyzed = classify::classify(analyzed_cluster);
-
-        match analyzed_tx.send(analyzed) {
+        match analyzed_tx.send(analyze_cluster(cluster)) {
             Ok(()) => tracing::trace!("sent analyzed cluster"),
             Err(e) => tracing::error!(error = %e, "failed to send analyzed cluster"),
         }
     }
+}
+
+pub(crate) fn analyze_cluster(cluster: Cluster) -> ClusterHealth {
+    classify::classify(analyze(cluster))
 }
 
 fn analyze(cluster: Cluster) -> AnalyzedCluster {

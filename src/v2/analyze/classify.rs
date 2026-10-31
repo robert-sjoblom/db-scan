@@ -64,7 +64,7 @@ impl From<&NodeVerdict> for Option<Reason> {
             NodeVerdict::NotStreaming => Some(Reason::RebuildingReplica), //?
             NodeVerdict::NotInQuorum => Some(Reason::NotInQuorum),
             NodeVerdict::SyncCommitOff => Some(Reason::SyncCommitOff),
-            NodeVerdict::Unreachable => Some(Reason::ReducedRedundancy),
+            NodeVerdict::Unreachable { .. } => Some(Reason::ReducedRedundancy),
         }
     }
 }
@@ -174,7 +174,7 @@ mod tests {
     #[case::chained_replication(NodeVerdict::ChainedReplication { upstream: "x".into() }, Some(Reason::ChainedReplica))]
     #[case::not_streaming(NodeVerdict::NotStreaming, Some(Reason::RebuildingReplica))]
     #[case::not_in_quorum(NodeVerdict::NotInQuorum, Some(Reason::NotInQuorum))]
-    #[case::unreachable(NodeVerdict::Unreachable, Some(Reason::ReducedRedundancy))]
+    #[case::unreachable(NodeVerdict::Unreachable { cause: None }, Some(Reason::ReducedRedundancy))]
     #[case::is_failover_node(NodeVerdict::IsFailoverNode, None)]
     fn node_verdict_to_reason(#[case] input: NodeVerdict, #[case] expected: Option<Reason>) {
         assert_eq!(Option::<Reason>::from(&input), expected);
