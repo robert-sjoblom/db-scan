@@ -5,7 +5,7 @@ use clap::Parser;
 use redact::Secret;
 use regex_lite::Regex;
 use serde::Deserialize;
-use tokio_postgres::config::SslMode;
+use tokio_postgres::config::{SslMode, TargetSessionAttrs};
 use tracing_subscriber::EnvFilter;
 
 pub(crate) static CONFIG: OnceLock<DbScanConfig> = OnceLock::new();
@@ -53,13 +53,16 @@ impl DbScanConfig {
         }
 
         let mut cfg = tokio_postgres::Config::new();
-        cfg.host(&pg_cfg.postgres.host)
-            .port(pg_cfg.postgres.port)
+        for host in &pg_cfg.postgres.hosts {
+            cfg.host(host);
+        }
+        cfg.port(pg_cfg.postgres.port)
             .dbname(&pg_cfg.postgres.dbname)
             .user(&pg_cfg.postgres.user)
             .password(self.pgpassword.expose_secret())
             .ssl_mode(SslMode::Prefer)
-            .connect_timeout(Duration::from_secs(5));
+            .connect_timeout(Duration::from_secs(5))
+            .target_session_attrs(TargetSessionAttrs::ReadWrite);
 
         Some(cfg)
     }
@@ -189,11 +192,46 @@ fn enabled_by_default() -> bool {
 }
 
 #[derive(Deserialize, Default, Debug)]
+#[serde(try_from = "PostgresCaptureFile")]
 pub(crate) struct PostgresCapture {
-    pub(crate) host: String,
+    pub(crate) hosts: Vec<String>,
     pub(crate) port: u16,
     pub(crate) dbname: String,
     pub(crate) user: String,
+}
+
+/// `host` predates `hosts` and is kept so existing configs load unchanged.
+#[derive(Deserialize)]
+struct PostgresCaptureFile {
+    host: Option<String>,
+    #[serde(default)]
+    hosts: Vec<String>,
+    port: u16,
+    dbname: String,
+    user: String,
+}
+
+impl TryFrom<PostgresCaptureFile> for PostgresCapture {
+    type Error = String;
+
+    fn try_from(file: PostgresCaptureFile) -> Result<Self, Self::Error> {
+        let mut hosts = Vec::new();
+        for host in file.host.into_iter().chain(file.hosts) {
+            if !hosts.contains(&host) {
+                hosts.push(host);
+            }
+        }
+        if hosts.is_empty() {
+            return Err("capture.postgres needs `host` or `hosts`".to_owned());
+        }
+
+        Ok(Self {
+            hosts,
+            port: file.port,
+            dbname: file.dbname,
+            user: file.user,
+        })
+    }
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -376,6 +414,8 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
 
 #[cfg(test)]
 mod tests {
+    use tokio_postgres::config::Host;
+
     use super::*;
 
     fn parse(yaml: &str) -> (FileConfig, Vec<String>) {
@@ -467,9 +507,66 @@ database_portal: {url: http://x}
         assert!(err.to_string().contains("postgres"), "{err}");
     }
 
+    fn capture_hosts(yaml: &str) -> Vec<String> {
+        let (file, unknown) = parse(yaml);
+        assert!(unknown.is_empty(), "reported {unknown:?}");
+        file.capture.expect("capture block parsed").postgres.hosts
+    }
+
     #[test]
-    fn capture_cfg_is_none_when_the_block_is_disabled() {
-        let config = DbScanConfig {
+    fn capture_single_host_is_the_only_candidate() {
+        let hosts = capture_hosts("capture: {postgres: {host: a, port: 1, dbname: d, user: u}}\n");
+
+        assert_eq!(hosts, ["a"]);
+    }
+
+    #[test]
+    fn capture_hosts_list_alone_is_enough() {
+        let hosts =
+            capture_hosts("capture: {postgres: {hosts: [a, b], port: 1, dbname: d, user: u}}\n");
+
+        assert_eq!(hosts, ["a", "b"]);
+    }
+
+    #[test]
+    fn capture_host_is_tried_before_hosts() {
+        let hosts = capture_hosts(
+            "capture: {postgres: {host: a, hosts: [b, c], port: 1, dbname: d, user: u}}\n",
+        );
+
+        assert_eq!(hosts, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn capture_host_repeated_in_hosts_is_tried_once() {
+        let hosts = capture_hosts(
+            "capture: {postgres: {host: a, hosts: [b, a, b], port: 1, dbname: d, user: u}}\n",
+        );
+
+        assert_eq!(hosts, ["a", "b"]);
+    }
+
+    #[test]
+    fn capture_postgres_without_any_host_is_an_error() {
+        let err = parse_file(
+            "capture: {postgres: {hosts: [], port: 1, dbname: d, user: u}}\n",
+            |_| {},
+        )
+        .expect_err("a host is required");
+
+        assert!(err.to_string().contains("host"), "{err}");
+    }
+
+    #[test]
+    fn unknown_key_inside_capture_postgres_is_reported() {
+        let (_, unknown) =
+            parse("capture: {postgres: {host: a, port: 1, dbname: d, user: u, extra: 1}}\n");
+
+        assert_eq!(unknown, ["capture.postgres.extra"]);
+    }
+
+    fn config_with_capture(capture: CaptureFile) -> DbScanConfig {
+        DbScanConfig {
             print_config: false,
             pguser: "u".into(),
             pgpassword: Secret::new("pw".into()),
@@ -491,16 +588,46 @@ database_portal: {url: http://x}
             check_disks: false,
             max_concurrency: 1,
             database_portal_url: "http://x".into(),
-            capture: Some(CaptureFile {
-                enabled: false,
-                postgres: PostgresCapture {
-                    host: "h".into(),
-                    port: 1,
-                    dbname: "d".into(),
-                    user: "u".into(),
-                },
-            }),
-        };
+            capture: Some(capture),
+        }
+    }
+
+    #[test]
+    fn capture_cfg_tries_every_host_and_requires_a_writable_one() {
+        let config = config_with_capture(CaptureFile {
+            enabled: true,
+            postgres: PostgresCapture {
+                hosts: vec!["a".into(), "b".into()],
+                port: 1,
+                dbname: "d".into(),
+                user: "u".into(),
+            },
+        });
+
+        let cfg = config.capture_cfg().expect("capture enabled");
+
+        assert_eq!(
+            cfg.get_hosts(),
+            [Host::Tcp("a".into()), Host::Tcp("b".into())]
+        );
+        assert_eq!(cfg.get_ports(), [1]);
+        assert_eq!(
+            cfg.get_target_session_attrs(),
+            TargetSessionAttrs::ReadWrite
+        );
+    }
+
+    #[test]
+    fn capture_cfg_is_none_when_the_block_is_disabled() {
+        let config = config_with_capture(CaptureFile {
+            enabled: false,
+            postgres: PostgresCapture {
+                hosts: vec!["h".into()],
+                port: 1,
+                dbname: "d".into(),
+                user: "u".into(),
+            },
+        });
 
         assert!(config.capture_cfg().is_none());
     }

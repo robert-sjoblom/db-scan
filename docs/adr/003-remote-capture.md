@@ -90,7 +90,9 @@ Capture is **off by default**. Enabled per-deployment by providing a `capture:` 
 capture:
   enabled: true
   postgres:
-    host: capture.example.com
+    hosts:
+      - capture-db001.example.com
+      - capture-db002.example.com
     port: 5432
     dbname: db_scan_captures
     user: capture_writer
@@ -98,6 +100,8 @@ capture:
 ```
 
 When the block is absent or `enabled: false`, the capture client is `None` in `PipelineContext` and the stage forwards without buffering. `enabled` defaults to true when omitted (since 2026-10-01), so the block's presence is enough to opt in and the key exists to switch a configured destination off without deleting it.
+
+`hosts` lists every node of the capture cluster (since 2026-10-31). The capture DB fails over like any other cluster, and the demoted primary stays up as a read-only replica that rejects the insert with `25006`. The client is built with `target_session_attrs=read-write`, so tokio-postgres tries the hosts in order and keeps the first whose `transaction_read_only` is `off`. The single `host` key still loads and is tried ahead of `hosts`; duplicates are dropped. All hosts share `port`, `dbname` and `user`.
 
 `--no-capture` overrides config-enabled capture for a single run.
 
