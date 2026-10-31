@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/robert-sjoblom/db-scan/compare/v0.6.0...v0.7.0) (2026-10-31)
+
+
+### Features
+
+* **output:** state ReducedRedundancy reason when possible ([#78](https://github.com/robert-sjoblom/db-scan/issues/78)) ([b380254](https://github.com/robert-sjoblom/db-scan/commit/b380254d008c3cd67e145dde332a788b336bb9c8))
+
 ## [0.6.0](https://github.com/robert-sjoblom/db-scan/compare/v0.5.1...v0.6.0) (2026-10-31)
 
 
