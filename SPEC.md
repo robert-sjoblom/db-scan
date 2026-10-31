@@ -228,7 +228,7 @@ Events are:
 ### 4.1 Connection Strategy
 
 - **Concurrency**: Async tasks per node via tokio
-- **mTLS**: Required for production and specific dev clusters (`dev-pg-app006`, `dev-pg-app010`, `dev-pg-app011`)
+- **mTLS**: Required for every environment except `dev`, and for the dev clusters listed in `postgres.cert_clusters`
 - **Certificate Hot-Reload**: Detect certificate file changes and reload without restart during long-running sessions
 
 ### 4.2 Retry Logic

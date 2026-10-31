@@ -12,7 +12,11 @@ use tracing::instrument;
 
 use anyhow::Context as _;
 
-use crate::{CONFIG, config::DbScanConfig, errors, v2::node::Node};
+use crate::{
+    config::{DbScanConfig, get_config},
+    errors,
+    v2::node::Node,
+};
 
 static CONNECTOR: OnceLock<MakeRustlsConnect> = OnceLock::new();
 static INSECURE_CONNECTOR: OnceLock<MakeRustlsConnect> = OnceLock::new();
@@ -33,8 +37,10 @@ pub async fn connect_with(cfg: &Config) -> anyhow::Result<(Client, PgConnection)
 
 pub async fn connect(node: &Node) -> anyhow::Result<(Client, PgConnection)> {
     tracing::trace!(node_name = %node.name, node_id = node.id, "connecting to node");
-    let cfg = pg_cfg(node);
-    let connector = if node.requires_cert() {
+    let args = get_config();
+    let requires_cert = node.requires_cert(&args.dev_cert_clusters);
+    let cfg = pg_cfg(node, args, requires_cert);
+    let connector = if requires_cert {
         connector()
     } else {
         insecure_connector()
@@ -44,14 +50,13 @@ pub async fn connect(node: &Node) -> anyhow::Result<(Client, PgConnection)> {
         .connect(connector.clone())
         .await
         .map_err(errors::pg_err)
-        .with_context(|| format!("requires_cert: {}", node.requires_cert()))
+        .with_context(|| format!("requires_cert: {requires_cert}"))
         .context("attempting: postgres connect")?;
     Ok((client, conn))
 }
 
-fn pg_cfg(node: &Node) -> Config {
+fn pg_cfg(node: &Node, args: &DbScanConfig, requires_cert: bool) -> Config {
     tracing::trace!(node_name = %node.name, "building pg config");
-    let args = CONFIG.get().expect("Args initialized");
     let mut cfg = Config::new();
 
     cfg.host(&node.name)
@@ -59,7 +64,7 @@ fn pg_cfg(node: &Node) -> Config {
         .dbname("postgres")
         .connect_timeout(Duration::from_secs(10));
 
-    if node.requires_cert() {
+    if requires_cert {
         cfg.ssl_mode(SslMode::Require)
             .user(&args.pguser)
             .password(args.pgpassword.expose_secret());
