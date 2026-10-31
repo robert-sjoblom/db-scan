@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
 
-use crate::v2::{
-    analyze::{
-        AnalyzedCluster, ClusterHealth, ClusterVerdict, Confidence, NodeVerdict, Reason,
-        SplitBrainFinding, SplitBrainInfo, SplitBrainResolution, Verdict,
-    },
-    scan::{
-        AnalyzedNode, disk_check::DiskCheckOutcome, health_check_primary::ReplicationConnection,
+use crate::{
+    errors::DbErrorKind,
+    v2::{
+        analyze::{
+            AnalyzedCluster, ClusterHealth, ClusterVerdict, Confidence, NodeVerdict, Reason,
+            SplitBrainFinding, SplitBrainInfo, SplitBrainResolution, Verdict,
+        },
+        scan::{
+            AnalyzedNode, disk_check::DiskCheckOutcome, health_check_primary::ReplicationConnection,
+        },
     },
 };
 
@@ -485,7 +488,38 @@ fn extract_disk_info(cluster: &AnalyzedCluster) -> String {
 )]
 fn format_reason(reason: Reason, verdict: &Verdict) -> (String, String) {
     match reason {
-        Reason::ReducedRedundancy => ("ReducedRedundancy".to_owned(), "{}".to_owned()),
+        Reason::ReducedRedundancy => {
+            let unreachable: Vec<(&str, Option<DbErrorKind>)> = verdict
+                .node_verdicts()
+                .iter()
+                .filter_map(|(name, v)| {
+                    if let NodeVerdict::Unreachable { cause } = v {
+                        Some((name.as_str(), *cause))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if unreachable.is_empty() {
+                return ("ReducedRedundancy".to_owned(), "{}".to_owned());
+            }
+            let nodes: Vec<String> = unreachable
+                .iter()
+                .map(|(name, cause)| match cause {
+                    Some(cause) => format!("{} {cause}", extract_db_number(name)),
+                    None => extract_db_number(name),
+                })
+                .collect();
+            let short = format!("ReducedRedundancy: {}", nodes.join(", "));
+            let details = serde_json::json!({
+                "unreachable": unreachable
+                    .iter()
+                    .map(|(node, cause)| serde_json::json!({ "node": node, "cause": cause }))
+                    .collect::<Vec<_>>()
+            })
+            .to_string();
+            (short, details)
+        }
         Reason::HighReplicationLag => ("HighReplicationLag".to_owned(), "{}".to_owned()),
         Reason::RebuildingReplica => ("RebuildingReplica".to_owned(), "{}".to_owned()),
         Reason::ChainedReplica => {
@@ -764,9 +798,76 @@ fn group_connections_by_identity(
 
 #[cfg(test)]
 mod tests {
-    use crate::v2::analyze::{Confidence, SplitBrainFinding};
+    use crate::{
+        errors::DbErrorKind,
+        v2::{
+            analyze::{Confidence, SplitBrainFinding, analyze_cluster},
+            cluster::Cluster,
+            tests_common::{
+                ClusterBuilder, NodeBuilder, PrimaryHealthBuilder, ReplicaHealthBuilder,
+            },
+        },
+    };
 
     use super::*;
+
+    /// db001 primary streaming to db002; db003 failed its connection with `cause`.
+    fn cluster_with_db003_down(cause: Option<DbErrorKind>) -> Cluster {
+        let primary = NodeBuilder::new("dev-pg-app001-db001.sto1.example.com")
+            .with_id(1)
+            .with_primary(PrimaryHealthBuilder::new().with_replication(1).build())
+            .build();
+        let replica = NodeBuilder::new("dev-pg-app001-db002.sto2.example.com")
+            .with_id(2)
+            .with_replica(ReplicaHealthBuilder::new().build())
+            .build();
+        let mut down = NodeBuilder::new("dev-pg-app001-db003.sto3.example.com")
+            .with_id(3)
+            .with_unknown()
+            .build();
+        down.errors = cause.into_iter().collect();
+        ClusterBuilder::new("dev-pg-app001")
+            .with_nodes(vec![primary, replica, down])
+            .build()
+    }
+
+    #[test]
+    fn reduced_redundancy_short_names_node_and_cause() {
+        let health = analyze_cluster(cluster_with_db003_down(Some(DbErrorKind::StartingUp)));
+
+        let view = build_cluster_view(&health);
+
+        assert_eq!(
+            view.reason.short,
+            "ReducedRedundancy: db003@sto3 starting up"
+        );
+    }
+
+    #[test]
+    fn reduced_redundancy_short_names_node_without_cause() {
+        let health = analyze_cluster(cluster_with_db003_down(None));
+
+        let view = build_cluster_view(&health);
+
+        assert_eq!(view.reason.short, "ReducedRedundancy: db003@sto3");
+    }
+
+    #[test]
+    fn reduced_redundancy_details_carry_full_node_name_and_cause() {
+        let health = analyze_cluster(cluster_with_db003_down(Some(DbErrorKind::StartingUp)));
+
+        let view = build_cluster_view(&health);
+
+        let details: serde_json::Value = serde_json::from_str(&view.reason.details_json).unwrap();
+        assert_eq!(
+            details,
+            serde_json::json!({
+                "unreachable": [
+                    { "node": "dev-pg-app001-db003.sto3.example.com", "cause": "StartingUp" }
+                ]
+            })
+        );
+    }
 
     #[test]
     fn lower_tl_short_string_names_action() {

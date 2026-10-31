@@ -320,7 +320,12 @@ pub(super) fn check_unreachable(
     if primary_sees_streaming(primary, node) {
         return;
     }
-    verdict.push_node_verdict(node.node_name.clone(), NodeVerdict::Unreachable);
+    verdict.push_node_verdict(
+        node.node_name.clone(),
+        NodeVerdict::Unreachable {
+            cause: node.errors.first().copied(),
+        },
+    );
 }
 
 fn primary_sees_streaming(primary: &AnalyzedNode, node: &AnalyzedNode) -> bool {
@@ -393,6 +398,7 @@ fn is_replica_streaming(node: &AnalyzedNode) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::errors::DbErrorKind;
     use crate::v2::{
         analyze::cluster_state_tests::{
             checked, make_node, make_primary_health, make_primary_health_with_config,
@@ -1067,7 +1073,7 @@ mod tests {
         check_unreachable(&node, &primary, &mut verdict);
 
         assert_eq!(
-            has_verdict(&verdict, &NodeVerdict::Unreachable),
+            has_verdict(&verdict, &NodeVerdict::Unreachable { cause: None }),
             should_fire,
         );
     }
@@ -1122,6 +1128,30 @@ mod tests {
 
         check_unreachable(&unreachable_replica, &primary, &mut verdict);
 
-        assert!(has_verdict(&verdict, &NodeVerdict::Unreachable));
+        assert!(has_verdict(
+            &verdict,
+            &NodeVerdict::Unreachable { cause: None }
+        ));
+    }
+
+    #[test]
+    fn check_unreachable_records_connection_error_as_cause() {
+        let mut unreachable_replica =
+            make_node(2, "dev-pg-app001-db002.sto2.example.com", Role::Unknown);
+        unreachable_replica.errors = vec![DbErrorKind::StartingUp];
+        let primary = primary_node(make_primary_health(0, None));
+        let mut verdict = Verdict::default();
+
+        check_unreachable(&unreachable_replica, &primary, &mut verdict);
+
+        assert_eq!(
+            verdict.node_verdicts,
+            vec![(
+                unreachable_replica.node_name.clone(),
+                NodeVerdict::Unreachable {
+                    cause: Some(DbErrorKind::StartingUp)
+                },
+            )]
+        );
     }
 }
