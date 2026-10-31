@@ -36,7 +36,7 @@ pub(crate) fn update() -> anyhow::Result<()> {
         Err(e) => return Err(anyhow::Error::new(e).context("running self-update")),
     };
 
-    if status.updated() {
+    if status.is_updated() {
         ensure_runnable(&exe)
             .with_context(|| format!("setting permissions on {}", exe.display()))?;
         println!("Updated db-scan to {}", status.version());
@@ -84,12 +84,16 @@ pub(crate) fn nag_if_outdated() {
         .build()
         .and_then(|u| u.get_latest_release());
 
-    let Ok(release) = latest else { return };
+    let Ok(releases) = latest else { return };
+    let Some(release) = releases.latest() else {
+        return;
+    };
 
-    if self_update::version::bump_is_greater(current, &release.version).unwrap_or(false) {
+    if self_update::version::bump_is_greater(current, release.version()).unwrap_or(false) {
         eprintln!(
             "note: db-scan {} is available (current: {}). Run `db-scan self-update` to upgrade.",
-            release.version, current
+            release.version(),
+            current
         );
     }
 }

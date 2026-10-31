@@ -114,6 +114,8 @@ postgres:
   sslkey: /path/to/ssl.key
   sslcert: /path/to/ssl.crt
   sslrootcert: /path/to/ca.crt
+  cert_clusters:
+    - dev-pg-app002
 
 defaults:
   user: postgres
@@ -141,6 +143,8 @@ capture:
 ```
 
 All fields are optional. CLI flags and environment variables take precedence over the config file. `PGPASSWORD` is never read from the config file. Keys db-scan does not recognise are reported on stderr and ignored, so a config written for another release still loads.
+
+Nodes outside `dev` always connect with the client certificate as `postgres.user`. A `dev` node does so only when its cluster is listed in `postgres.cert_clusters`; other `dev` nodes connect with `defaults.user` and `defaults.password`. The list defaults to empty.
 
 ### Environment Variables
 

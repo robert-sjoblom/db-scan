@@ -2,8 +2,6 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-const CERT_CLUSTERS_IN_DEV: [&str; 3] = ["dev-pg-app006", "dev-pg-app010", "dev-pg-app011"];
-
 /// Node information from the database portal API.
 /// This is the input to the v2 scanning pipeline.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -29,12 +27,12 @@ impl Node {
             .join("-")
     }
 
-    pub fn requires_cert(&self) -> bool {
+    pub fn requires_cert(&self, dev_cert_clusters: &[String]) -> bool {
         if self.env() != "dev" {
             return true;
         }
 
-        CERT_CLUSTERS_IN_DEV.contains(&self.cluster_name().as_str())
+        dev_cert_clusters.contains(&self.cluster_name())
     }
 }
 
@@ -96,52 +94,32 @@ mod tests {
     }
 
     #[test]
-    fn test_node_requires_cert_dev_pg_app006() {
+    fn dev_node_in_listed_cluster_requires_cert() {
         let node = Node {
-            name: "dev-pg-app006-db001.sto1.example.com".to_owned(),
+            name: "dev-pg-app002-db001.sto1.example.com".to_owned(),
             ..Node::fixture()
         };
 
-        assert!(node.requires_cert());
+        assert!(node.requires_cert(&["dev-pg-app002".to_owned()]));
     }
 
     #[test]
-    fn test_node_requires_cert_dev_pg_app010() {
-        let node = Node {
-            name: "dev-pg-app010-db001.sto2.example.com".to_owned(),
-            ..Node::fixture()
-        };
-
-        assert!(node.requires_cert());
-    }
-
-    #[test]
-    fn test_node_requires_cert_dev_pg_app011() {
-        let node = Node {
-            name: "dev-pg-app011-db001.sto2.example.com".to_owned(),
-            ..Node::fixture()
-        };
-
-        assert!(node.requires_cert());
-    }
-
-    #[test]
-    fn test_node_requires_cert_dev_other() {
+    fn dev_node_in_unlisted_cluster_does_not_require_cert() {
         let node = Node {
             name: "dev-pg-app001-db001.sto1.example.com".to_owned(),
             ..Node::fixture()
         };
 
-        assert!(!node.requires_cert());
+        assert!(!node.requires_cert(&["dev-pg-app002".to_owned()]));
     }
 
     #[test]
-    fn test_node_requires_cert_other() {
+    fn non_dev_node_requires_cert_with_empty_list() {
         let node = Node {
             name: "acce-pg-app001-db001.sto1.example.com".to_owned(),
             ..Node::fixture()
         };
 
-        assert!(node.requires_cert());
+        assert!(node.requires_cert(&[]));
     }
 }

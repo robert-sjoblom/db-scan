@@ -24,6 +24,7 @@ pub(crate) struct DbScanConfig {
     pub(crate) pgsslkey: PathBuf,
     pub(crate) pgsslcert: PathBuf,
     pub(crate) pgsslrootcert: PathBuf,
+    pub(crate) dev_cert_clusters: Vec<String>,
     pub(crate) cluster: Option<Regex>,
     pub(crate) log_level: EnvFilter,
     pub(crate) show_healthy: bool,
@@ -206,6 +207,8 @@ struct PostgresFile {
     sslkey: Option<PathBuf>,
     sslcert: Option<PathBuf>,
     sslrootcert: Option<PathBuf>,
+    #[serde(default)]
+    cert_clusters: Vec<String>,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -340,6 +343,7 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         .database_portal
         .url
         .ok_or_else(|| anyhow!("database_portal.url not set in config"))?;
+    let dev_cert_clusters = file.postgres.cert_clusters;
     let capture = file.capture;
 
     let config = DbScanConfig {
@@ -349,6 +353,7 @@ pub(crate) fn load() -> anyhow::Result<DbScanConfig> {
         pgsslkey,
         pgsslcert,
         pgsslrootcert,
+        dev_cert_clusters,
         cluster: cli.cluster,
         log_level,
         show_healthy: cli.show_healthy,
@@ -398,7 +403,7 @@ mod tests {
     #[test]
     fn known_keys_are_not_reported() {
         let (file, unknown) = parse(
-            "postgres: {user: u, sslkey: /k, sslcert: /c, sslrootcert: /r}
+            "postgres: {user: u, sslkey: /k, sslcert: /c, sslrootcert: /r, cert_clusters: [dev-pg-app002]}
 defaults: {user: d, password: p}
 ssh: {user: s}
 display: {log_level: info, no_color: true}
@@ -409,8 +414,16 @@ database_portal: {url: http://x}
 
         assert!(unknown.is_empty(), "reported {unknown:?}");
         assert_eq!(file.postgres.user.as_deref(), Some("u"));
+        assert_eq!(file.postgres.cert_clusters, ["dev-pg-app002"]);
         assert_eq!(file.display.no_color, Some(true));
         assert_eq!(file.database_portal.url.as_deref(), Some("http://x"));
+    }
+
+    #[test]
+    fn cert_clusters_default_to_empty() {
+        let (file, _) = parse("postgres: {user: u}\n");
+
+        assert!(file.postgres.cert_clusters.is_empty());
     }
 
     #[test]
@@ -463,6 +476,7 @@ database_portal: {url: http://x}
             pgsslkey: PathBuf::from("/k"),
             pgsslcert: PathBuf::from("/c"),
             pgsslrootcert: PathBuf::from("/r"),
+            dev_cert_clusters: Vec::new(),
             cluster: None,
             log_level: EnvFilter::new("info"),
             show_healthy: false,
